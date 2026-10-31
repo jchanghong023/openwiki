@@ -473,6 +473,10 @@ export async function searchWiki(
   const scope = await resolveWikiSearchScope(root, request.workspace?.trim(), options);
   if (scope.status === "workspace_required") return scope;
   const terms = queryTerms(query);
+  const hanPhrases = [...new Set(query.match(/\p{Script=Han}{2,}/gu) ?? [])].slice(
+    0,
+    WIKI_RETRIEVAL_LIMITS.queryTerms,
+  );
   if (!terms.length) {
     return scope.workspace
       ? {
@@ -505,6 +509,7 @@ export async function searchWiki(
   const response = await rankSearchUnits(
     units,
     terms,
+    hanPhrases,
     paths,
     limit,
     scope.workspace !== undefined,
@@ -526,6 +531,7 @@ export async function searchWiki(
  *
  * @param units - Searchable page sections.
  * @param terms - Normalized query terms.
+ * @param hanPhrases - Original continuous Han phrases used for exact-match ranking.
  * @param paths - Normalized repository source hints.
  * @param limit - Maximum number of results to return.
  * @param includeWiki - Whether public results need linked wiki identities.
@@ -534,6 +540,7 @@ export async function searchWiki(
 async function rankSearchUnits(
   units: SearchUnit[],
   terms: readonly string[],
+  hanPhrases: readonly string[],
   paths: readonly string[],
   limit: number,
   includeWiki: boolean,
@@ -550,16 +557,19 @@ async function rankSearchUnits(
     units.forEach((unit, index) =>
       insert.run(
         index + 1,
-        unit.introductionOnly ? "" : normalizeSearchText(unit.title),
-        unit.introductionOnly ? "" : normalizeSearchText(unit.description),
-        normalizeSearchText(unit.heading),
-        normalizeSearchText(unit.prose),
-        unit.introductionOnly ? "" : normalizeSearchText(unit.identifiers),
+        unit.introductionOnly ? "" : normalizeFtsText(unit.title),
+        unit.introductionOnly ? "" : normalizeFtsText(unit.description),
+        normalizeFtsText(unit.heading),
+        normalizeFtsText(unit.prose),
+        unit.introductionOnly ? "" : normalizeFtsText(unit.identifiers),
       ),
     );
 
-    // Only normalized word terms reach MATCH, and each is quoted as data.
-    const match = terms.map((term) => `"${term}"`).join(" OR ");
+    // Han characters are separate index tokens; a phrase preserves adjacency.
+    const matchTerms = terms.map((term) =>
+      `"${/^\p{Script=Han}+$/u.test(term) ? [...term].join(" ") : term}"`,
+    );
+    const match = matchTerms.join(" OR ");
     const ranked = database
       .prepare(
         "SELECT rowid, bm25(units, 8, 4, 6, 1, 3) AS score FROM units WHERE units MATCH ? ORDER BY score, rowid",
@@ -569,19 +579,34 @@ async function rankSearchUnits(
       "SELECT rowid FROM units WHERE units MATCH ?",
     );
     const coverage = new Map<number, number>();
-    for (const term of terms) {
-      for (const row of matchingRows.all(`"${term}"`)) {
+    for (const term of matchTerms) {
+      for (const row of matchingRows.all(term)) {
         const rowid = Number(row.rowid);
         coverage.set(rowid, (coverage.get(rowid) ?? 0) + 1);
       }
     }
     const pathScores = units.map((unit) => pathMatchCount(unit, paths));
+    const exactHanScores: number[] = [];
+    if (hanPhrases.length) {
+      for (const { rowid } of ranked) {
+        const index = Number(rowid) - 1;
+        const unit = units[index];
+        const fields = unit.introductionOnly
+          ? [unit.heading, unit.prose]
+          : [unit.title, unit.description, unit.heading, unit.prose, unit.identifiers];
+        exactHanScores[index] = hanPhrases.reduce(
+          (score, phrase) => score + Number(fields.some((field) => field.includes(phrase))),
+          0,
+        );
+      }
+    }
 
     ranked.sort((left, right) => {
       const leftId = Number(left.rowid);
       const rightId = Number(right.rowid);
       return (
         pathScores[rightId - 1] - pathScores[leftId - 1] ||
+        (exactHanScores[rightId - 1] ?? 0) - (exactHanScores[leftId - 1] ?? 0) ||
         (coverage.get(rightId) ?? 0) - (coverage.get(leftId) ?? 0) ||
         left.score - right.score ||
         leftId - rightId
@@ -889,16 +914,16 @@ function relevantExcerpt(raw: string, terms: readonly string[]): string {
     .lexer(raw)
     .filter((token) => token.type !== "heading" && token.raw.trim());
   const best = blocks
-    .map((block, index) => ({
-      block,
-      index,
-      score: terms.reduce(
-        (score, term) =>
-          score +
-          (normalizeSearchText(block.raw).toLowerCase().includes(term) ? 1 : 0),
-        0,
-      ),
-    }))
+    .map((block, index) => {
+      const text = normalizeSearchText(block.raw)
+        .toLowerCase()
+        .replace(/(?<=\p{Script=Han})[^\p{L}\p{N}]+(?=\p{Script=Han})/gu, "");
+      return {
+        block,
+        index,
+        score: terms.reduce((score, term) => score + Number(text.includes(term)), 0),
+      };
+    })
     .sort(
       (left, right) => right.score - left.score || left.index - right.index,
     )[0]?.block.raw;
@@ -930,13 +955,27 @@ function relevantExcerpt(raw: string, terms: readonly string[]): string {
  * @returns Normalized terms safe to quote as FTS data.
  */
 function queryTerms(query: string): string[] {
-  const all = [
-    ...new Set(
-      normalizeSearchText(query)
-        .toLowerCase()
-        .match(/[\p{L}\p{N}_]+/gu) ?? [],
-    ),
-  ].slice(0, WIKI_RETRIEVAL_LIMITS.queryTerms);
+  const tokens =
+    normalizeSearchText(query)
+      .toLowerCase()
+      .replace(/(\p{Script=Han}+)/gu, " $1 ")
+      .match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const words = new Set<string>();
+  const han = new Set<string>();
+  for (const token of tokens) {
+    if (!/^\p{Script=Han}+$/u.test(token)) {
+      words.add(token);
+      continue;
+    }
+    const characters = [...token];
+    if (characters.length === 1) han.add(token);
+    else {
+      for (let index = 0; index < characters.length - 1; index += 1) {
+        han.add(characters[index] + characters[index + 1]);
+      }
+    }
+  }
+  const all = [...words, ...han].slice(0, WIKI_RETRIEVAL_LIMITS.queryTerms);
   const meaningful = all.filter((term) => !STOP_WORDS.has(term));
   return meaningful.length ? meaningful : all;
 }
@@ -945,13 +984,22 @@ function queryTerms(query: string): string[] {
  * Retains exact text while adding searchable camel-case and path components.
  *
  * @param text - Raw title, prose, or identifier text.
+ * @param separator - Boundary between original and split projections.
  * @returns Text containing both original and split token forms.
  */
-function normalizeSearchText(text: string): string {
-  return `${text} ${text
+function normalizeSearchText(text: string, separator = " "): string {
+  return `${text}${separator}${text
     .replace(/([\p{Ll}\d])([\p{Lu}])/gu, "$1 $2")
     .replace(/([\p{Lu}])([\p{Lu}][\p{Ll}])/gu, "$1 $2")
     .replace(/[_./:#-]+/gu, " ")}`;
+}
+
+/** Separate Han characters for FTS phrase matching without changing displayed text. */
+function normalizeFtsText(text: string): string {
+  // unicode61 indexes this private-use token, while queryTerms excludes it.
+  // It prevents a Han phrase from crossing the two text projections.
+  const separator = /\p{Script=Han}/u.test(text) ? " \uE000 " : " ";
+  return normalizeSearchText(text, separator).replace(/(\p{Script=Han})/gu, " $1 ");
 }
 
 /**
