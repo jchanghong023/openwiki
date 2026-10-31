@@ -138,6 +138,7 @@ function buildClaimsRuntime(
           session,
           store,
           result.verificationByPage,
+          excludedPages,
         )),
       );
       for (const warning of warnings) onWarning(warning);
@@ -156,22 +157,25 @@ function buildClaimsRuntime(
  * @param session - Process-local Claims working state.
  * @param store - Repository Claims and Markdown persistence boundary.
  * @param verificationByPage - Durable verification eligibility by factual page.
+ * @param excludedPages - Pages not safe to project or rehash in this pass.
  * @returns Page-version synchronization warnings requiring run failure.
  */
 async function finalizeVerificationProjection(
   session: ClaimSession,
   store: ClaimsStore,
   verificationByPage: Parameters<typeof synchronizeClaimsVerification>[1],
+  excludedPages: ReadonlySet<string>,
 ): Promise<string[]> {
   const originals = await synchronizeClaimsVerification(
     store,
     verificationByPage,
+    excludedPages,
   );
   // Deterministic finalizers may have changed code-owned frontmatter without
   // changing the verification event. Refresh every represented page so Claims
   // sidecars always describe the final Markdown bytes.
   const refreshed = await session.refreshPageVersions(store, [
-    ...verificationByPage.keys(),
+    ...[...verificationByPage.keys()].filter((page) => !excludedPages.has(page)),
   ]);
   const unsafeStamps = refreshed.failedPages.filter(
     (page) =>

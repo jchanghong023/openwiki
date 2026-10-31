@@ -506,6 +506,8 @@ function refreshSidebarFilter(): void {
  */
 function initGraph(): void {
   const container = $("#graph");
+  // force-graph replaces the container's children when it mounts.
+  const overlay = $("#graph-overlay");
   G = ForceGraph()(container)
     .backgroundColor(graphBg())
     .nodeRelSize(4)
@@ -532,6 +534,7 @@ function initGraph(): void {
     .linkDirectionalParticleColor(() => "#7FC8FF")
     .onNodeClick((n) => selectNode(n.id))
     .onNodeHover(hoverHighlight);
+  container.appendChild(overlay);
   // Deliberately NO onBackgroundClick handler: clicking empty graph space must
   // not change any page state (issue #670). Clearing the selection/reader on a
   // stray click made the open page vanish, so background clicks are a no-op.

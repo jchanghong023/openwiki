@@ -36,19 +36,42 @@ export function getOpenWikiHomeDisplayPath(
     : "~/.openwiki";
 }
 
-export const openWikiHomeDir = resolveOpenWikiHomeDir();
-export const openWikiHomeDisplayPath = getOpenWikiHomeDisplayPath();
-export const openWikiConnectorsDir = path.join(openWikiHomeDir, "connectors");
-export const openWikiConversationHistoryDir = path.join(
-  openWikiHomeDir,
-  "conversation_history",
-);
-export const openWikiLocalWikiDir = path.join(openWikiHomeDir, "wiki");
-export const openWikiSkillsDir = path.join(openWikiHomeDir, "skills");
-export const openWikiConnectorsDisplayPath = `${openWikiHomeDisplayPath}/connectors`;
-export const openWikiLocalWikiDisplayPath = `${openWikiHomeDisplayPath}/wiki`;
-export const openWikiSkillsDisplayPath = `${openWikiHomeDisplayPath}/skills`;
-export const openWikiEnvDisplayPath = `${openWikiHomeDisplayPath}/.env`;
+export let openWikiHomeDir = resolveOpenWikiHomeDir();
+export let openWikiHomeDisplayPath = getOpenWikiHomeDisplayPath();
+export let openWikiConnectorsDir = path.join(openWikiHomeDir, "connectors");
+export let openWikiConversationHistoryDir = path.join(openWikiHomeDir, "conversation_history");
+export let openWikiLocalWikiDir = path.join(openWikiHomeDir, "wiki");
+export let openWikiSkillsDir = path.join(openWikiHomeDir, "skills");
+export let openWikiEnvDir = openWikiHomeDir;
+export let openWikiEnvPath = path.join(openWikiHomeDir, ".env");
+export let openWikiConnectorsDisplayPath = `${openWikiHomeDisplayPath}/connectors`;
+export let openWikiLocalWikiDisplayPath = `${openWikiHomeDisplayPath}/wiki`;
+export let openWikiSkillsDisplayPath = `${openWikiHomeDisplayPath}/skills`;
+export let openWikiEnvDisplayPath = `${openWikiHomeDisplayPath}/.env`;
+
+let embeddedHomeDir: string | undefined;
+
+/** Resolve the active registry home without changing standalone environment rules. */
+export function getActiveOpenWikiHomeDir(): string {
+  return embeddedHomeDir ?? resolveOpenWikiHomeDir();
+}
+
+/** Select a host-managed home without modifying the standalone environment. */
+export function setEmbeddedOpenWikiHomeDir(directory: string): void {
+  embeddedHomeDir = path.resolve(directory);
+  openWikiHomeDir = embeddedHomeDir;
+  openWikiHomeDisplayPath = embeddedHomeDir;
+  openWikiConnectorsDir = path.join(embeddedHomeDir, "connectors");
+  openWikiConversationHistoryDir = path.join(embeddedHomeDir, "conversation_history");
+  openWikiLocalWikiDir = path.join(embeddedHomeDir, "wiki");
+  openWikiSkillsDir = path.join(embeddedHomeDir, "skills");
+  openWikiEnvDir = embeddedHomeDir;
+  openWikiEnvPath = path.join(embeddedHomeDir, ".env");
+  openWikiConnectorsDisplayPath = `${openWikiHomeDisplayPath}/connectors`;
+  openWikiLocalWikiDisplayPath = `${openWikiHomeDisplayPath}/wiki`;
+  openWikiSkillsDisplayPath = `${openWikiHomeDisplayPath}/skills`;
+  openWikiEnvDisplayPath = `${openWikiHomeDisplayPath}/.env`;
+}
 
 export function getConnectorDir(connectorId: string): string {
   return path.join(openWikiConnectorsDir, connectorId);

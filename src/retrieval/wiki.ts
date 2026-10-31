@@ -6,6 +6,7 @@ import {
   resolveReadableWiki,
   resolveWikiSearchScope,
   type WikiWorkspaceRequired,
+  type WikiWorkspaceStorageOptions,
   type WikiWorkspaceSummary,
 } from "../linking/wiki-workspaces.js";
 
@@ -433,6 +434,7 @@ type RankedSearchRow = {
 export async function searchWiki(
   root: string,
   request: WikiSearchRequest,
+  options?: WikiWorkspaceStorageOptions,
 ): Promise<WikiSearchResponse> {
   const query = request.query.trim();
   const limit = request.limit ?? WIKI_RETRIEVAL_LIMITS.defaultSearchResults;
@@ -468,7 +470,7 @@ export async function searchWiki(
     );
   }
 
-  const scope = await resolveWikiSearchScope(root, request.workspace?.trim());
+  const scope = await resolveWikiSearchScope(root, request.workspace?.trim(), options);
   if (scope.status === "workspace_required") return scope;
   const terms = queryTerms(query);
   if (!terms.length) {
@@ -632,6 +634,7 @@ function renderSearchResult(
 export async function readWikiSections(
   root: string,
   request: WikiReadRequest,
+  options?: WikiWorkspaceStorageOptions,
 ): Promise<WikiReadResponse> {
   if (!request.sections.length) {
     throw new WikiRetrievalError("Provide at least one section anchor.");
@@ -652,7 +655,7 @@ export async function readWikiSections(
     );
   }
 
-  const selectedWiki = await resolveReadableWiki(root, request.wiki?.trim());
+  const selectedWiki = await resolveReadableWiki(root, request.wiki?.trim(), options);
 
   const normalizedPage = normalizeRetrievableWikiPage(request.page);
   const requested = request.sections.map(normalizeSectionAnchor);

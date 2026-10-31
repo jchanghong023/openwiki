@@ -1,8 +1,6 @@
 import path from "node:path";
-import {
-  createConnectorRegistry,
-  isConnectorId,
-} from "../connectors/registry.js";
+import { createConnectorRegistry } from "../connectors/registry.js";
+import { isConnectorId } from "../connectors/ids.js";
 import type {
   ConnectorId,
   ConnectorIngestResult,
@@ -32,15 +30,11 @@ import {
   withRunTelemetry,
   type RunTelemetryContext,
 } from "../telemetry/index.js";
+import type { IngestionTarget } from "./target.js";
+export { parseIngestionTarget } from "./target.js";
+export type { IngestionTarget, SourceInstanceTarget } from "./target.js";
 
 const INGESTION_WINDOW_HOURS = 24;
-
-export type IngestionTarget = ConnectorId | "all" | SourceInstanceTarget;
-
-export type SourceInstanceTarget = {
-  kind: "source-instance";
-  id: string;
-};
 
 export type SourceIngestionResult = {
   agentResult?: OpenWikiRunResult;
@@ -104,23 +98,6 @@ export async function runOpenWikiIngestion(
   }
 
   return { results };
-}
-
-export function parseIngestionTarget(value: string): IngestionTarget | null {
-  if (value === "all") {
-    return "all";
-  }
-
-  if (isConnectorId(value)) {
-    return value;
-  }
-
-  return isSafeSourceInstanceId(value)
-    ? {
-        kind: "source-instance",
-        id: value,
-      }
-    : null;
 }
 
 async function runSourceIngestion({
@@ -248,10 +225,6 @@ function resolveIngestionSourceInstances(
 
     return sourceConfig.id === target.id;
   });
-}
-
-function isSafeSourceInstanceId(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/u.test(value);
 }
 
 function formatTarget(target: IngestionTarget): string {

@@ -20,7 +20,7 @@
  * second call is a no-op once `window` is present.
  */
 export async function ensureDomGlobals(): Promise<void> {
-  if (typeof globalThis.window !== "undefined") {
+  if (typeof (globalThis as Record<string, unknown>).window !== "undefined") {
     return;
   }
 

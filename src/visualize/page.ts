@@ -2,30 +2,38 @@
  * The branded single-page visualizer app (LangChain design system), rendered for
  * either the local server or a static export. Scalar wiki fields (title, type,
  * tags) are HTML-escaped client-side before innerHTML; Markdown bodies are
- * additionally protected by CSP and DOMPurify. Browser libraries load from
- * cdn.jsdelivr.net at pinned exact versions with SRI hashes.
+ * additionally protected by CSP and DOMPurify. Standalone pages load pinned
+ * browser libraries from the CDN; embedded pages use supplied local assets.
  */
-const CDN = "https://cdn.jsdelivr.net";
-const GOOGLE_FONTS_STYLESHEET_ORIGIN = "https://fonts.googleapis.com";
-const GOOGLE_FONTS_FILE_ORIGIN = "https://fonts.gstatic.com";
 export const CSP = [
   "default-src 'none'",
-  `script-src 'self' ${CDN}`,
-  `style-src 'self' 'unsafe-inline' ${GOOGLE_FONTS_STYLESHEET_ORIGIN}`,
+  "script-src 'self' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data:",
-  `font-src 'self' ${GOOGLE_FONTS_FILE_ORIGIN}`,
+  "font-src 'self' https://fonts.gstatic.com",
   "connect-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
 ].join("; ");
 
-function renderPage(staticExport: boolean): string {
+export const EMBEDDED_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+function renderPage(staticExport: boolean, embedded = false): string {
   const liveStatus = staticExport ? "Static" : "Live";
   const liveClass = staticExport ? "live-pill stale" : "live-pill";
   const clientUrl = staticExport ? "./client.js" : "/client.js";
   const stylesUrl = staticExport ? "./styles.css" : "/styles.css";
   const cspMeta = staticExport
-    ? `<meta http-equiv="Content-Security-Policy" content="${CSP}" />`
+    ? `<meta http-equiv="Content-Security-Policy" content="${embedded ? EMBEDDED_CSP : CSP}" />`
     : "";
 
   return /* html */ `<!doctype html>
@@ -35,7 +43,10 @@ ${cspMeta}
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>OpenWiki visualizer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
+${embedded ? `<script src="./force-graph.js"></script>
+<script src="./marked.js"></script>
+<script src="./purify.js"></script>
+<script src="./mermaid.js"></script>` : `<link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <script
   src="https://cdn.jsdelivr.net/npm/force-graph@1.49.5/dist/force-graph.min.js"
@@ -56,7 +67,7 @@ ${cspMeta}
   src="https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"
   integrity="sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E"
   crossorigin="anonymous"
-></script>
+></script>`}
 <link rel="stylesheet" href="${stylesUrl}" />
 </head>
 <body>
@@ -102,3 +113,7 @@ export const PAGE = renderPage(false);
 
 /** The static-export page, loaded entirely from sibling files. */
 export const STATIC_PAGE = renderPage(true);
+
+/** Offline pages for embedding applications supplying browser libraries. */
+export const EMBEDDED_PAGE = renderPage(false, true);
+export const EMBEDDED_STATIC_PAGE = renderPage(true, true);

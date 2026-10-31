@@ -9,17 +9,7 @@ import { createXConnector } from "./sources/x.js";
 import { openWikiConnectorsDisplayPath } from "../config/openwiki-home.js";
 import type { ConnectorId, ConnectorRuntime } from "./types.js";
 
-export const CONNECTOR_IDS = [
-  "custom-mcp",
-  "git-repo",
-  "notion",
-  "x",
-  "google",
-  "web-search",
-  "hackernews",
-  "langsmith",
-  "slack",
-] as const satisfies readonly ConnectorId[];
+export { CONNECTOR_IDS, isConnectorId } from "./ids.js";
 
 export function createConnectorRegistry(): Record<
   ConnectorId,
@@ -49,10 +39,6 @@ export function createConnectorRegistry(): Record<
     "web-search": createWebSearchConnector(),
     x: createXConnector(),
   };
-}
-
-export function isConnectorId(value: string): value is ConnectorId {
-  return (CONNECTOR_IDS as readonly string[]).includes(value);
 }
 
 /**

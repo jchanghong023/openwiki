@@ -7,7 +7,7 @@ import type { AuthProviderId } from "../auth/types.js";
 import {
   parseIngestionTarget,
   type IngestionTarget,
-} from "../ingestion/ingestion.js";
+} from "../ingestion/target.js";
 import {
   getHostTarget,
   listHostTargets,

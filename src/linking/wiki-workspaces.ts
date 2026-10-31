@@ -7,7 +7,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { UPDATE_METADATA_PATH } from "../config/constants.js";
-import { resolveOpenWikiHomeDir } from "../config/openwiki-home.js";
+import { getActiveOpenWikiHomeDir } from "../config/openwiki-home.js";
 import { writeTextAtomic } from "../integrations/install/atomic-file.js";
 import { restrictDirToCurrentUser } from "../platform/windows-acl.js";
 
@@ -1190,7 +1190,7 @@ async function writeWorkspaceRegistry(
  */
 function workspaceRegistryPath(options: WikiWorkspaceStorageOptions): string {
   const directory = path.resolve(
-    options.configDirectory ?? resolveOpenWikiHomeDir(),
+    options.configDirectory ?? getActiveOpenWikiHomeDir(),
   );
   return path.join(directory, WIKI_WORKSPACES_FILE);
 }

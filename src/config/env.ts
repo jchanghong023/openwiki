@@ -82,11 +82,14 @@ import {
 } from "./constants.js";
 import { isReasoningEffort } from "./reasoning.js";
 import { isFileNotFoundError } from "../platform/fs-errors.js";
-import { openWikiEnvDisplayPath, openWikiHomeDir } from "./openwiki-home.js";
+import {
+  openWikiEnvDir,
+  openWikiEnvDisplayPath,
+  openWikiEnvPath,
+} from "./openwiki-home.js";
 import { restrictDirToCurrentUser } from "../platform/windows-acl.js";
 
-export const openWikiEnvDir = openWikiHomeDir;
-export const openWikiEnvPath = path.join(openWikiEnvDir, ".env");
+export { openWikiEnvDir, openWikiEnvPath } from "./openwiki-home.js";
 
 type EnvMap = Record<string, string>;
 

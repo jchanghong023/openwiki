@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildGraph, type WikiGraph } from "./graph.js";
-import { STATIC_PAGE } from "./page.js";
+import { EMBEDDED_STATIC_PAGE, STATIC_PAGE } from "./page.js";
 
 /** Browser assets emitted alongside the server and copied into static exports. */
 export interface VisualizerAssets {
@@ -9,6 +9,10 @@ export interface VisualizerAssets {
   clientLibJs: string;
   /** Stylesheet served verbatim and copied into static exports. */
   stylesCss: string;
+  /** Locally shipped browser libraries, keyed by their fixed route names. */
+  browserAssets?: Record<string, string>;
+  /** Third-party notices distributed with the browser assets. */
+  licenseAssets?: Record<string, string>;
 }
 
 /** Inputs for writing a self-contained static visualizer directory. */
@@ -53,7 +57,11 @@ export async function exportStaticVisualizer(
 
   await mkdir(options.outputDir, { recursive: true });
   await Promise.all([
-    writeFile(path.join(options.outputDir, "index.html"), STATIC_PAGE, "utf8"),
+    writeFile(
+      path.join(options.outputDir, "index.html"),
+      assets.browserAssets ? EMBEDDED_STATIC_PAGE : STATIC_PAGE,
+      "utf8",
+    ),
     writeFile(
       path.join(options.outputDir, "client.js"),
       assets.clientJs,
@@ -74,6 +82,22 @@ export async function exportStaticVisualizer(
       `${JSON.stringify(graph, null, 2)}\n`,
       "utf8",
     ),
+    ...Object.entries(assets.browserAssets ?? {}).map(([name, content]) => {
+      if (!["force-graph.js", "marked.js", "purify.js", "mermaid.js"].includes(name)) {
+        throw new Error(`Unexpected visualizer asset: ${name}`);
+      }
+      return writeFile(path.join(options.outputDir, name), content, "utf8");
+    }),
+    ...Object.entries(assets.licenseAssets ?? {}).map(async ([name, content]) => {
+      const segments = name.split("/");
+      if (segments[0] !== "licenses" || segments.length < 2 ||
+          segments.some((segment) => !segment || segment === "." || segment === ".." || /[\\:]/.test(segment))) {
+        throw new Error(`Unexpected visualizer license path: ${name}`);
+      }
+      const destination = path.join(options.outputDir, ...segments);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await writeFile(destination, content, "utf8");
+    }),
   ]);
 
   return { outputDir: options.outputDir, graph };

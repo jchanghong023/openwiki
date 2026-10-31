@@ -13,6 +13,7 @@ import {
   workspaceDrafts,
   type DiscoveredRepository,
   type WikiWorkspaceDraft,
+  type WikiWorkspaceStorageOptions,
 } from "../linking/wiki-workspaces.js";
 import { getErrorMessage } from "../platform/diagnostics.js";
 import type { CliCommand } from "./commands.js";
@@ -25,6 +26,7 @@ import { WikiWorkspaceManager } from "./components/wiki-workspace-manager.js";
  */
 export async function runLinkCommand(
   command: Extract<CliCommand, { kind: "link" }>,
+  options?: WikiWorkspaceStorageOptions,
 ): Promise<void> {
   try {
     if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
@@ -36,7 +38,7 @@ export async function runLinkCommand(
       command.directory,
       baseDirectory,
     );
-    const registry = await readWikiWorkspaceRegistry();
+    const registry = await readWikiWorkspaceRegistry(options);
     const result = await manageWikiWorkspaces(
       workspaceDrafts(registry),
       finderRoot,
@@ -48,7 +50,7 @@ export async function runLinkCommand(
       return;
     }
 
-    const saved = await saveWikiWorkspaces(result);
+    const saved = await saveWikiWorkspaces(result, options);
     process.stdout.write(
       `Saved ${saved.workspaces.length} wiki workspace${saved.workspaces.length === 1 ? "" : "s"}.\n`,
     );
@@ -66,21 +68,22 @@ export async function runLinkCommand(
  */
 export async function runWorkspaceCommand(
   command: Extract<CliCommand, { kind: "workspace" }>,
+  options?: WikiWorkspaceStorageOptions,
 ): Promise<void> {
   try {
     const root = await resolveRepositoryRoot(path.resolve(process.cwd()));
     if (command.action === "use") {
-      const workspace = await setActiveWikiWorkspace(root, command.workspace);
+      const workspace = await setActiveWikiWorkspace(root, command.workspace, options);
       process.stdout.write(`Active wiki workspace: ${workspace.name}\n`);
     } else if (command.action === "clear") {
-      const cleared = await clearActiveWikiWorkspace(root);
+      const cleared = await clearActiveWikiWorkspace(root, options);
       process.stdout.write(
         cleared
           ? "Cleared the active wiki workspace.\n"
           : "No active wiki workspace was set.\n",
       );
     } else {
-      process.stdout.write(await describeCurrentWorkspace(root));
+      process.stdout.write(await describeCurrentWorkspace(root, options));
     }
     process.exitCode = 0;
   } catch (error) {
@@ -129,8 +132,8 @@ async function manageWikiWorkspaces(
  * @param root - Canonical current repository root.
  * @returns Human-readable current workspace status.
  */
-async function describeCurrentWorkspace(root: string): Promise<string> {
-  const listed = await listWikiWorkspaces(root);
+async function describeCurrentWorkspace(root: string, options?: WikiWorkspaceStorageOptions): Promise<string> {
+  const listed = await listWikiWorkspaces(root, undefined, options);
   if (listed.activeWorkspace) {
     const active = listed.workspaces.find(
       (workspace) => workspace.id === listed.activeWorkspace,

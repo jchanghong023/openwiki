@@ -317,6 +317,15 @@ export interface NativeRepositoryGenerationOptions {
    * Optional lifecycle and bounded worker-tool event consumer.
    */
   onEvent?: (event: OpenWikiRunEvent) => void;
+
+  /** Skip standalone repository setup when invoked by a host. */
+  embedded?: boolean;
+
+  /** Host-provided root containing the bundled Skill directories. */
+  skillsDir?: string;
+
+  /** Cancel model requests and leave unfinished jobs resumable. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -332,6 +341,9 @@ export interface NativeRepositoryGenerationResult {
    * Whether the repository changed after planning, leaving a later update due.
    */
   sourceChanged?: true;
+
+  /** One or more page jobs were skipped and require a later update. */
+  partialFailure?: true;
 }
 
 /**
@@ -346,7 +358,9 @@ export interface NativeRepositoryGenerationResult {
 export async function runNativeRepositoryGeneration(
   options: NativeRepositoryGenerationOptions,
 ): Promise<NativeRepositoryGenerationResult> {
+  options.signal?.throwIfAborted();
   const begun = await beginNativeRepositoryRun(options);
+  options.signal?.throwIfAborted();
   if (!("run" in begun)) {
     options.onEvent?.({ type: "repository_progress", stage: "noop" });
     return { skipped: true };
@@ -365,6 +379,8 @@ export async function runNativeRepositoryGeneration(
       options.model,
       run.state.planningContext,
       options.onEvent,
+      options.skillsDir,
+      options.signal,
     );
   }
 
@@ -375,7 +391,10 @@ export async function runNativeRepositoryGeneration(
     view,
     options.pageConcurrency ?? 1,
     options.workerStartStaggerMs ?? DEFAULT_WORKER_START_STAGGER_MS,
+    options.skillsDir,
+    options.signal,
   );
+  options.signal?.throwIfAborted();
   options.onEvent?.({
     type: "repository_progress",
     stage: "finalizing",
@@ -394,9 +413,11 @@ export async function runNativeRepositoryGeneration(
       text: "Repository source changed while OpenWiki was running. The wiki was finalized without advancing its source checkpoint; run openwiki --update to reconcile the changes.\n",
     });
   }
-  return result.sourceChanged
-    ? { skipped: false, sourceChanged: true }
-    : { skipped: false };
+  return {
+    skipped: false,
+    ...(result.sourceChanged ? { sourceChanged: true as const } : {}),
+    ...(skippedPageSnapshots.length > 0 ? { partialFailure: true as const } : {}),
+  };
 }
 
 /**
@@ -413,6 +434,7 @@ async function beginNativeRepositoryRun(
     mode: options.mode,
     language: options.language ?? undefined,
     force: options.force,
+    embedded: options.embedded,
     planningContext: options.planningContext ?? undefined,
     actor: {
       producerActor: OPENWIKI_PRODUCER_ACTOR,
@@ -436,6 +458,8 @@ async function runPlanningAgent(
   model: BaseChatModel,
   planningContext?: string,
   onEvent?: (event: OpenWikiRunEvent) => void,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const ignore = await OpenWikiIgnore.load(run.root);
   const wikiBackend = new OpenWikiLocalShellBackend({
@@ -492,7 +516,7 @@ async function runPlanningAgent(
     },
   });
 
-  const backend = createAgentBackend(wikiBackend);
+  const backend = createAgentBackend(wikiBackend, { skillsDir });
   const agent = createDeepAgent({
     name: PLANNER_AGENT_NAME,
     model,
@@ -517,6 +541,8 @@ async function runPlanningAgent(
     [{ role: "user", content: "Plan this repository wiki now." }],
     resolveTraceThreadId(run.state.runId),
     onEvent,
+    undefined,
+    signal,
   );
 
   if (!submitted || !run.state.plan) {
@@ -619,6 +645,8 @@ async function runPendingPageAgents(
   view: ActiveBeginView,
   pageConcurrency: number,
   workerStartStaggerMs: number,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<RepositoryPageSnapshot[]> {
   const size = Math.max(1, Math.floor(pageConcurrency));
   const pool: PageWorkerPool = {
@@ -647,13 +675,18 @@ async function runPendingPageAgents(
     pool,
     heldBack,
     workerStartStaggerMs,
+    skillsDir,
+    signal,
   );
   if (!pool.fatal && heldBack.size > 0) {
     pool.size = 1;
-    await runWorkerLoops(run, model, onEvent, view, pool, new Set(), 0);
+    await runWorkerLoops(
+      run, model, onEvent, view, pool, new Set(), 0, skillsDir, signal,
+    );
   }
 
   if (pool.fatal) throw pool.fatal.error;
+  signal?.throwIfAborted();
   return pool.skipped;
 }
 
@@ -668,6 +701,8 @@ async function runWorkerLoops(
   pool: PageWorkerPool,
   heldBack: ReadonlySet<string>,
   workerStartStaggerMs: number,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   await Promise.all(
     Array.from({ length: pool.size }, (_, slot) =>
@@ -680,6 +715,8 @@ async function runWorkerLoops(
         pool,
         heldBack,
         workerStartStaggerMs,
+        skillsDir,
+        signal,
       ),
     ),
   );
@@ -699,13 +736,32 @@ async function runWorkerLoop(
   pool: PageWorkerPool,
   heldBack: ReadonlySet<string>,
   workerStartStaggerMs: number,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (slot > 0 && workerStartStaggerMs > 0) {
-    await scheduler.wait(slot * workerStartStaggerMs);
+    try {
+      await scheduler.wait(slot * workerStartStaggerMs, { signal });
+    } catch (error) {
+      pool.fatal ??= { error };
+      return;
+    }
   }
 
+  if (signal?.aborted) {
+    pool.fatal ??= { error: signal.reason };
+    return;
+  }
   while (!pool.fatal && slot < pool.size) {
+    if (signal?.aborted) {
+      pool.fatal ??= { error: signal.reason };
+      return;
+    }
     const next = await acquireNextJob(run, pool, heldBack);
+    if (signal?.aborted) {
+      pool.fatal ??= { error: signal.reason };
+      return;
+    }
     // Another worker can fail fatally while this loop waits for serialized job
     // acquisition. Do not start model work for that newly claimed page.
     if (pool.fatal || slot >= pool.size) return;
@@ -716,7 +772,9 @@ async function runWorkerLoop(
 
     let outcome: PageAgentOutcome;
     try {
-      outcome = await runPageAgent(run, next.job, model, onEvent);
+      outcome = await runPageAgent(
+        run, next.job, model, onEvent, skillsDir, signal,
+      );
     } catch (error) {
       pool.fatal ??= { error };
       removeInFlightPage(pool, next.job.path);
@@ -868,19 +926,37 @@ async function runPageAgent(
   job: PendingPageJob,
   model: BaseChatModel,
   onEvent?: (event: OpenWikiRunEvent) => void,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<PageAgentOutcome> {
   const snapshot = await captureRepositoryPageSnapshot(run, job.id);
   let skipped: PageAgentOutcome = { status: "skipped", snapshot };
 
   for (let attempt = 1; attempt <= PAGE_WORKER_ATTEMPT_LIMIT; attempt += 1) {
-    const outcome = await runPageWorkerAttempt(
-      run,
-      job,
-      snapshot,
-      model,
-      onEvent,
-    );
+    let outcome: PageAgentOutcome;
+    try {
+      signal?.throwIfAborted();
+      outcome = await runPageWorkerAttempt(
+        run,
+        job,
+        snapshot,
+        model,
+        onEvent,
+        skillsDir,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted &&
+          run.state.plan?.pages.find(({ id }) => id === job.id)?.status === "pending") {
+        await skipRepositoryPage(run, snapshot);
+      }
+      throw error;
+    }
     if (outcome.status === "submitted") return outcome;
+    if (signal?.aborted) {
+      await skipRepositoryPage(run, snapshot);
+      signal.throwIfAborted();
+    }
     skipped = outcome;
 
     // A rate limit means the provider is asking for less traffic, so it is
@@ -919,6 +995,8 @@ async function runPageWorkerAttempt(
   snapshot: RepositoryPageSnapshot,
   model: BaseChatModel,
   onEvent?: (event: OpenWikiRunEvent) => void,
+  skillsDir?: string,
+  signal?: AbortSignal,
 ): Promise<PageAgentOutcome> {
   const ignore = await OpenWikiIgnore.load(run.root);
   const wikiBackend = new OpenWikiLocalShellBackend({
@@ -977,7 +1055,7 @@ async function runPageWorkerAttempt(
     },
   });
 
-  const backend = createAgentBackend(wikiBackend);
+  const backend = createAgentBackend(wikiBackend, { skillsDir });
   const agent = createDeepAgent({
     name: workerAgentName(job.path),
     model,
@@ -1013,9 +1091,11 @@ async function runPageWorkerAttempt(
       resolveTraceThreadId(run.state.runId),
       onEvent,
       job.path,
+      signal,
     );
   } catch (error) {
     if (submitted) return { status: "submitted" };
+    if (signal?.aborted) throw error;
     // A fatal submission failure is not retried: the store itself is refusing,
     // so a second attempt would fail the same way and the run should stop.
     if (fatalSubmissionFailure) throw error;
@@ -1053,6 +1133,7 @@ async function streamWorkerTools(
   traceThreadId: string,
   onEvent?: (event: OpenWikiRunEvent) => void,
   page?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   // LangGraph copies `configurable.thread_id` into every run's metadata, which
   // is what LangSmith groups a thread by. Safe to share across concurrent
@@ -1062,6 +1143,7 @@ async function streamWorkerTools(
     {
       streamMode: ["tools"],
       subgraphs: true,
+      signal,
       configurable: { thread_id: traceThreadId },
     },
   );

@@ -8,18 +8,12 @@ import { watch } from "node:fs";
 import { stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { buildGraph, type WikiGraph } from "./graph.js";
-import { CSP, PAGE } from "./page.js";
-import { loadVisualizerAssets } from "./static-export.js";
+import { CSP, EMBEDDED_CSP, EMBEDDED_PAGE, PAGE } from "./page.js";
+import { loadVisualizerAssets, type VisualizerAssets } from "./static-export.js";
 
 const HOST = "127.0.0.1"; // loopback only (never expose the wiki on the network)
 const PORT_ATTEMPTS = 20; // ports to try before giving up when the preferred one is busy
 const WATCH_DEBOUNCE_MS = 150; // collapse a burst of file-change events into one rebuild
-
-// The client JS is an external module (/client.js), so scripts need only 'self' plus the
-// jsdelivr CDN origin for the three browser libraries (whose integrity is pinned by the SRI
-// hashes on the <script> tags in page.ts) - no 'unsafe-inline' for scripts. The stylesheet is
-// a same-origin asset (/styles.css), which 'self' covers; style-src still keeps 'unsafe-inline'
-// because client.ts writes inline style= attributes for legend swatches and sidebar dots.
 
 /**
  * Inputs for a single visualizer server run. Every field is required: the CLI parser
@@ -40,83 +34,92 @@ export interface VisualizeServerOptions {
    * Whether to open the default browser once the server is listening.
    */
   open: boolean;
+
+  /** Precompiled assets supplied by an embedding application. */
+  assets?: VisualizerAssets;
 }
 
-/*
- * Coverage: the server-lifecycle code below (boot, listen/retry, fs watch,
- * browser launch, banner) needs a live HTTP server, a real filesystem, and a
- * SIGINT to exercise - none reachable from a unit test. Its one piece of pure
- * request logic is extracted into `createRequestHandler` (fully covered), so we
- * exclude the lifecycle glue rather than count it as permanently uncovered.
- */
-/* v8 ignore start */
-/**
- * Start the visualizer server. Resolves when the server is stopped (SIGINT);
- * exits the process on an unrecoverable listen error, matching the prototype.
- */
-export async function runVisualizeServer(
+/** Start the visualizer without taking ownership of the host process. */
+export async function startEmbeddedVisualizeServer(
   options: VisualizeServerOptions,
-): Promise<void> {
+): Promise<{ url: string; close(): Promise<void> }> {
   const { wikiRoot } = options;
   await assertWikiDir(wikiRoot);
-
-  let graph: WikiGraph = {
-    root: "",
-    generatedAt: "",
-    types: [],
-    nodes: [],
-    edges: [],
-  };
+  const assets = options.assets ?? await loadVisualizerAssets();
+  let graph = await buildGraph(wikiRoot);
   const sseClients = new Set<ServerResponse>();
+  let closed = false;
+  let timer: NodeJS.Timeout | undefined;
+  let rebuilding = Promise.resolve();
 
-  // The compiled client modules and the stylesheet sit beside this file in dist/visualize/.
-  // They are static, server-owned build artifacts (no user input, never evaluated), read once
-  // at startup and served verbatim at fixed routes.
-  const { clientJs, clientLibJs, stylesCss } = await loadVisualizerAssets();
-
-  const broadcastReload = (): void => {
-    for (const res of sseClients) res.write("event: reload\ndata: 1\n\n");
-  };
-  const rebuild = async (reason: string): Promise<void> => {
-    try {
-      graph = await buildGraph(wikiRoot);
-      process.stdout.write(
-        `  ↻ ${reason}: ${graph.nodes.length} pages, ${graph.edges.length} links\n`,
-      );
-      broadcastReload();
-    } catch (error) {
-      process.stderr.write(`  ! rebuild failed: ${(error as Error).message}\n`);
-    }
-  };
-
-  const server = createServer(
-    createRequestHandler({
-      // The graph is rebuilt (reassigned) on every file change, so read it live
-      // per request rather than capturing a stale snapshot.
-      getGraph: () => graph,
-      clientJs,
-      clientLibJs,
-      stylesCss,
-      sseClients,
-    }),
-  );
-
-  return new Promise<void>((resolve) => {
-    process.once("SIGINT", () => {
-      process.stdout.write("\n  stopped.\n");
-      server.close(() => resolve());
+  const rebuild = (): void => {
+    rebuilding = rebuilding.then(async () => {
+      if (closed) return;
+      try {
+        const next = await buildGraph(wikiRoot);
+        if (closed) return;
+        graph = next;
+        for (const client of sseClients) client.write("event: reload\ndata: 1\n\n");
+      } catch (error) {
+        process.stderr.write(`OpenWiki visualizer refresh failed: ${String(error)}\n`);
+      }
     });
-    listen(server, options.port, PORT_ATTEMPTS, (boundPort) => {
-      const url = `http://${HOST}:${boundPort}`;
-      void rebuild("initial scan").then(() => {
-        startWatch(wikiRoot, rebuild);
-        printBanner(wikiRoot, url);
-        if (options.open) openBrowser(url);
-      });
+  };
+
+  const watcher = watch(wikiRoot, { recursive: true }, () => {
+    clearTimeout(timer);
+    timer = setTimeout(rebuild, WATCH_DEBOUNCE_MS);
+  });
+  watcher.on("error", (error) => {
+    process.stderr.write(`OpenWiki visualizer watcher failed: ${String(error)}\n`);
+  });
+  const server = createServer(createRequestHandler({
+    getGraph: () => graph,
+    ...assets,
+    sseClients,
+  }));
+  let boundPort: number;
+  try {
+    boundPort = await listen(server, options.port, PORT_ATTEMPTS);
+  } catch (error) {
+    watcher.close();
+    clearTimeout(timer);
+    throw error;
+  }
+  server.on("error", (error) => {
+    process.stderr.write(`OpenWiki visualizer server failed: ${String(error)}\n`);
+  });
+  const url = `http://${HOST}:${boundPort}`;
+  if (options.open) openBrowser(url);
+  let closing: Promise<void> | undefined;
+  return {
+    url,
+    close: () => {
+      if (closing) return closing;
+      closed = true;
+      watcher.close();
+      clearTimeout(timer);
+      for (const client of sseClients) client.end();
+      sseClients.clear();
+      closing = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+        server.closeAllConnections();
+      }).then(async () => { await rebuilding; });
+      return closing;
+    },
+  };
+}
+
+/** Standalone CLI entry: wait for SIGINT, then close only this server. */
+export async function runVisualizeServer(options: VisualizeServerOptions): Promise<void> {
+  const server = await startEmbeddedVisualizeServer(options);
+  printBanner(options.wikiRoot, server.url);
+  await new Promise<void>((resolve, reject) => {
+    process.once("SIGINT", () => {
+      server.close().then(resolve, reject);
     });
   });
 }
-/* v8 ignore stop */
 
 /**
  * Dependencies for the visualizer HTTP request handler. The handler is a pure
@@ -146,6 +149,9 @@ export interface RequestHandlerDeps {
    */
   stylesCss: string;
 
+  /** Additional browser libraries at fixed same-origin paths. */
+  browserAssets?: Record<string, string>;
+
   /**
    * Live set of open Server-Sent-Events responses; the handler registers new
    * `/events` subscribers here and drops them when the connection closes.
@@ -162,16 +168,16 @@ export interface RequestHandlerDeps {
 export function createRequestHandler(
   deps: RequestHandlerDeps,
 ): (req: IncomingMessage, res: ServerResponse) => void {
-  const { getGraph, clientJs, clientLibJs, stylesCss, sseClients } = deps;
+  const { getGraph, clientJs, clientLibJs, stylesCss, browserAssets, sseClients } = deps;
 
   return (req: IncomingMessage, res: ServerResponse) => {
-    const url = req.url ?? "/";
+    const url = (req.url ?? "/").split("?", 1)[0];
     if (url === "/" || url === "/index.html") {
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
-        "content-security-policy": CSP,
+        "content-security-policy": browserAssets ? EMBEDDED_CSP : CSP,
       });
-      res.end(PAGE);
+      res.end(browserAssets ? EMBEDDED_PAGE : PAGE);
       return;
     }
     if (url === "/client.js") {
@@ -189,6 +195,13 @@ export function createRequestHandler(
       res.end(stylesCss);
       return;
     }
+    const libraryName = url.slice(1);
+    if (["force-graph.js", "marked.js", "purify.js", "mermaid.js"].includes(libraryName)
+        && browserAssets?.[libraryName] !== undefined) {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+      res.end(browserAssets[libraryName]);
+      return;
+    }
     if (url === "/api/graph") {
       res.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
@@ -204,7 +217,7 @@ export function createRequestHandler(
       });
       res.write("retry: 2000\n\n");
       sseClients.add(res);
-      req.on("close", () => sseClients.delete(res));
+      res.on("close", () => sseClients.delete(res));
       return;
     }
     // Only these fixed routes exist; no filesystem path is ever derived from req.url.
@@ -233,46 +246,26 @@ async function assertWikiDir(wikiRoot: string): Promise<void> {
 /**
  * Try the preferred port, incrementing on EADDRINUSE.
  */
-function listen(
-  server: Server,
-  port: number,
-  attemptsLeft: number,
-  onReady: (port: number) => void,
-): void {
-  const onError = (err: NodeJS.ErrnoException): void => {
-    if (err.code === "EADDRINUSE" && attemptsLeft > 0) {
-      listen(server, port + 1, attemptsLeft - 1, onReady);
-    } else {
-      process.stderr.write(`Failed to start server: ${err.message}\n`);
-      process.exit(1);
-    }
-  };
-  server.once("error", onError);
-  server.listen(port, HOST, () => {
-    server.removeListener("error", onError);
-    onReady(port);
-  });
-}
-
-/**
- * Debounced recursive watch of the wiki directory.
- */
-function startWatch(
-  wikiRoot: string,
-  rebuild: (reason: string) => Promise<void>,
-): void {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    watch(wikiRoot, { recursive: true }, () => {
-      clearTimeout(timer);
-      timer = setTimeout(
-        () => void rebuild("change detected"),
-        WATCH_DEBOUNCE_MS,
-      );
+async function listen(server: Server, port: number, attemptsLeft: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: NodeJS.ErrnoException): void => {
+      if (error.code === "EADDRINUSE" && attemptsLeft > 0 && port < 65535) {
+        void listen(server, port + 1, attemptsLeft - 1).then(resolve, reject);
+      } else {
+        reject(error);
+      }
+    };
+    server.once("error", onError);
+    server.listen(port, HOST, () => {
+      server.removeListener("error", onError);
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("Visualizer did not bind a TCP port"));
+        return;
+      }
+      resolve(address.port);
     });
-  } catch {
-    process.stdout.write("  (live watch unavailable on this platform)\n");
-  }
+  });
 }
 
 /**

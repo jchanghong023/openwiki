@@ -30,15 +30,18 @@ export type ClaimsVerificationChanges = ReadonlyMap<string, string>;
  *
  * @param store - Contained generated-page storage.
  * @param verificationByPage - Active durable event per Claims page.
+ * @param excludedPages - Pages currently owned by other workers or restored on skip.
  * @returns Original Markdown for changed pages, used for transactional rollback.
  */
 export async function synchronizeClaimsVerification(
   store: ClaimsVerificationPageStore,
   verificationByPage: ReadonlyMap<string, ClaimsVerificationEvent | null>,
+  excludedPages: ReadonlySet<string> = new Set(),
 ): Promise<ClaimsVerificationChanges> {
   const changes = new Map<string, string>();
 
   for (const page of await store.discoverPages()) {
+    if (excludedPages.has(page)) continue;
     const content = await store.readMarkdown(page);
     const repaired = repairOkfFrontmatter(content, page).content;
     const current = readVerificationEvents(repaired);

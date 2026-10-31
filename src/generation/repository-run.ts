@@ -31,7 +31,7 @@ import type {
   InspectedClaim,
   PageClaims,
 } from "../claims/brains/code/types.js";
-import { ensureCodeModeRepoSetup } from "../ingestion/code-mode.js";
+import { ensureCodeModeRepoSetup } from "../ingestion/code-mode-setup.js";
 import {
   parseFrontmatterFields,
   repairPersistedFile,
@@ -95,6 +95,11 @@ export interface BeginRepositoryRunInput {
    * Whether update no-op detection must be bypassed.
    */
   force?: boolean;
+
+  /**
+   * Skip standalone repository instruction and workflow setup.
+   */
+  embedded?: boolean;
 
   /**
    * Actual user and connector context supplied to planning.
@@ -400,9 +405,11 @@ export async function beginRepositoryRun(
   const requestedLanguage =
     resolvedRequest.kind === "resolved" ? resolvedRequest.language : undefined;
 
-  await ensureCodeModeRepoSetup(input.root, {
-    createWorkflow: input.mode === "init",
-  });
+  if (!input.embedded) {
+    await ensureCodeModeRepoSetup(input.root, {
+      createWorkflow: input.mode === "init",
+    });
+  }
 
   const persisted = await readRepositoryRunState(input.root);
   if (persisted) {
