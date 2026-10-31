@@ -324,39 +324,19 @@ export async function createRepositorySourceSnapshot(
     throw new Error("Repository source fingerprint requires an absolute root.");
   }
 
-  const [head, trackedOutput, untrackedOutput, statusOutput] =
-    await Promise.all([
-      readFingerprintHead(cwd),
-      runFingerprintGit(cwd, ["ls-files", "--cached", "-z"]),
-      runFingerprintGit(cwd, [
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "-z",
-      ]),
-      runFingerprintGit(cwd, [
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--no-renames",
-        "-z",
-      ]),
-    ]);
-
-  const trackedPaths = new Set(
-    splitFingerprintNul(trackedOutput).map(assertFingerprintGitPath),
-  );
-  const candidatePaths = new Set([
-    ...trackedPaths,
-    ...splitFingerprintNul(untrackedOutput).map(assertFingerprintGitPath),
+  const [head, sourcePaths, statusOutput] = await Promise.all([
+    readFingerprintHead(cwd),
+    getRepositorySourcePaths(cwd, openWikiIgnore),
+    runFingerprintGit(cwd, [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--no-renames",
+      "-z",
+    ]),
   ]);
-  if (await fingerprintEntryExists(path.join(cwd, OPENWIKI_IGNORE_FILE))) {
-    candidatePaths.add(OPENWIKI_IGNORE_FILE);
-  }
 
-  const visiblePaths = [...candidatePaths]
-    .filter((candidate) => isFingerprintSourcePath(candidate, openWikiIgnore))
-    .sort(compareFingerprintStrings);
+  const { trackedPaths, visiblePaths } = sourcePaths;
   const statusEntries = parseFingerprintStatus(statusOutput)
     .filter(({ path: candidate }) =>
       isFingerprintSourcePath(candidate, openWikiIgnore),
@@ -389,6 +369,44 @@ export async function createRepositorySourceSnapshot(
     fingerprint,
     ...(head.startsWith("unborn:") ? {} : { gitHead: head }),
   };
+}
+
+/**
+ * Selects the same Git-index and untracked source entries used by the
+ * repository fingerprint. Tracked entries may be missing or be Git links;
+ * this is a snapshot boundary, not a promise that every path is a readable
+ * regular file or that the model will inspect it.
+ */
+export async function getRepositorySourcePaths(
+  cwd: string,
+  openWikiIgnore: OpenWikiIgnore,
+): Promise<{ trackedPaths: Set<string>; visiblePaths: string[] }> {
+  if (!path.isAbsolute(cwd)) {
+    throw new Error("Repository source paths require an absolute root.");
+  }
+  const [trackedOutput, untrackedOutput] = await Promise.all([
+    runFingerprintGit(cwd, ["ls-files", "--cached", "-z"]),
+    runFingerprintGit(cwd, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+    ]),
+  ]);
+  const trackedPaths = new Set(
+    splitFingerprintNul(trackedOutput).map(assertFingerprintGitPath),
+  );
+  const candidatePaths = new Set([
+    ...trackedPaths,
+    ...splitFingerprintNul(untrackedOutput).map(assertFingerprintGitPath),
+  ]);
+  if (await fingerprintEntryExists(path.join(cwd, OPENWIKI_IGNORE_FILE))) {
+    candidatePaths.add(OPENWIKI_IGNORE_FILE);
+  }
+  const visiblePaths = [...candidatePaths]
+    .filter((candidate) => isFingerprintSourcePath(candidate, openWikiIgnore))
+    .sort(compareFingerprintStrings);
+  return { trackedPaths, visiblePaths };
 }
 
 /**
@@ -443,6 +461,7 @@ async function runFingerprintGit(
       cwd,
       encoding: "utf8",
       maxBuffer: SOURCE_FINGERPRINT_MAX_BUFFER_BYTES,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     });
     return stdout;
   } catch (error) {
@@ -898,35 +917,36 @@ export async function getRepositoryChangedPaths(
   cwd: string,
   openWikiIgnore: OpenWikiIgnore,
   baseGitHead?: string,
+  strict = false,
 ): Promise<string[]> {
   const paths = new Set<string>();
 
   if (baseGitHead) {
-    for (const candidate of await runGitLines(cwd, [
-      "diff",
-      "--name-only",
-      `${baseGitHead}..HEAD`,
-    ])) {
-      paths.add(normalizeGitPath(candidate));
+    for (const candidate of await runGitLines(
+      cwd,
+      ["diff", "--name-only", "-z", `${baseGitHead}..HEAD`],
+      strict,
+    )) {
+      paths.add(assertFingerprintGitPath(candidate));
     }
   }
 
   // Staged + unstaged tracked changes relative to HEAD.
-  for (const candidate of await runGitLines(cwd, [
-    "diff",
-    "--name-only",
-    "HEAD",
-  ])) {
-    paths.add(normalizeGitPath(candidate));
+  for (const candidate of await runGitLines(
+    cwd,
+    ["diff", "--name-only", "-z", "HEAD"],
+    strict,
+  )) {
+    paths.add(assertFingerprintGitPath(candidate));
   }
 
   // Untracked files.
-  for (const candidate of await runGitLines(cwd, [
-    "ls-files",
-    "--others",
-    "--exclude-standard",
-  ])) {
-    paths.add(normalizeGitPath(candidate));
+  for (const candidate of await runGitLines(
+    cwd,
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    strict,
+  )) {
+    paths.add(assertFingerprintGitPath(candidate));
   }
 
   return [...paths]
@@ -937,19 +957,22 @@ export async function getRepositoryChangedPaths(
 }
 
 /**
- * Runs a best-effort Git query and returns its non-empty output lines.
+ * Runs a Git query for NUL-delimited paths, best-effort unless strict.
  */
-async function runGitLines(cwd: string, args: string[]): Promise<string[]> {
+async function runGitLines(
+  cwd: string,
+  args: string[],
+  strict = false,
+): Promise<string[]> {
   try {
     const { stdout } = await execFileAsync("git", ["--no-pager", ...args], {
       cwd,
       maxBuffer: 1024 * 1024,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
     });
-    return stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-  } catch {
+    return splitFingerprintNul(stdout);
+  } catch (error) {
+    if (strict) throw error;
     // Changed-path context is planner assistance, not a correctness boundary.
     // Claims preflight and the planner still run when history cannot be read.
     return [];
