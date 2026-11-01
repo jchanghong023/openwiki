@@ -291,6 +291,9 @@ export interface NativeRepositoryGenerationOptions {
    */
   model: BaseChatModel;
 
+  /** Optional planning-only override; page workers continue using model. */
+  plannerModel?: BaseChatModel;
+
   /**
    * Maximum page workers running at once.
    *
@@ -376,7 +379,7 @@ export async function runNativeRepositoryGeneration(
     await runPlanningAgent(
       run,
       view,
-      options.model,
+      options.plannerModel ?? options.model,
       run.state.planningContext,
       options.onEvent,
       options.skillsDir,
