@@ -31,6 +31,8 @@ import type {
   OpenWikiCommand,
   OpenWikiOutputMode,
   OpenWikiRunOptions,
+  RepositoryInstructionBaseline,
+  RepositoryInstructionHashes,
   RunContext,
   UpdateMetadata,
   UpdateRunStatus,
@@ -55,6 +57,7 @@ export type UpdateNoopStatus =
        * created before language tracking); the refresh omits the field too.
        */
       language?: string;
+      coveredSourceFingerprint?: string;
     }
   | {
       shouldSkip: false;
@@ -98,6 +101,24 @@ async function readRunWikiGoal(
   }
 
   return (await readOpenWikiOnboardingConfig()).wikiGoal;
+}
+
+/** Hash only the repository instructions, treating absent and empty wiki goals equally. */
+export async function readRepositoryInstructionHashes(
+  cwd: string,
+  wikiGoal?: string,
+): Promise<RepositoryInstructionHashes> {
+  const agentsHash = createHash("sha256");
+  try {
+    agentsHash.update("file\0").update(await readFile(path.join(cwd, "AGENTS.md")));
+  } catch (error) {
+    if (!isFileNotFoundError(error)) throw error;
+    agentsHash.update("missing");
+  }
+  return {
+    agents: agentsHash.digest("hex"),
+    wiki: createHash("sha256").update(wikiGoal ?? "").digest("hex"),
+  };
 }
 
 /**
@@ -146,6 +167,17 @@ export async function getUpdateNoopStatus(
     return { shouldSkip: false, reason: "missing current git head" };
   }
 
+  const wikiGoal = await readRepositoryWikiInstructions(cwd);
+  const instructions = await readRepositoryInstructionHashes(cwd, wikiGoal);
+  const baseline = lastUpdate.instructionBaseline;
+  if ((baseline && baseline.wiki !== instructions.wiki) || (!baseline && wikiGoal)) {
+    return { shouldSkip: false, reason: "wiki instructions changed" };
+  }
+  if (baseline && baseline.agents !== instructions.agents) {
+    return { shouldSkip: false, reason: "repository instructions changed" };
+  }
+  let coveredAgentsChange = false;
+
   const status = await runGit(cwd, [
     "status",
     "--short",
@@ -156,7 +188,17 @@ export async function getUpdateNoopStatus(
     .map((line) => line.trimEnd())
     .filter(Boolean)
     .filter((line) => !isUpdateMetadataStatusLine(line))
-    .filter((line) => !lineReferencesIgnoredPath(line, openWikiIgnore));
+    .filter((line) => !lineReferencesIgnoredPath(line, openWikiIgnore))
+    .filter((line) => {
+      const paths = extractGitPaths(line);
+      if (paths.length !== 1) return true;
+      if (paths[0] === "openwiki/INSTRUCTIONS.md") return false;
+      if (paths[0] === "AGENTS.md" && baseline) {
+        coveredAgentsChange = true;
+        return false;
+      }
+      return true;
+    });
 
   if (meaningfulStatus.length > 0) {
     return { shouldSkip: false, reason: "worktree has changes" };
@@ -170,10 +212,13 @@ export async function getUpdateNoopStatus(
 
     if (
       committedPaths.length === 0 ||
-      committedPaths.some(
-        (changedPath) =>
-          !isOpenWikiPath(changedPath) && !openWikiIgnore.ignores(changedPath),
-      )
+      committedPaths.some((changedPath) => {
+        if (changedPath === "AGENTS.md" && baseline) {
+          coveredAgentsChange = true;
+          return false;
+        }
+        return !isOpenWikiPath(changedPath) && !openWikiIgnore.ignores(changedPath);
+      })
     ) {
       return { shouldSkip: false, reason: "git head changed" };
     }
@@ -184,6 +229,9 @@ export async function getUpdateNoopStatus(
     gitHead: head,
     model: lastUpdate.model,
     language: lastUpdate.language,
+    ...(coveredAgentsChange && baseline
+      ? { coveredSourceFingerprint: baseline.sourceFingerprint }
+      : {}),
   };
 }
 
@@ -206,6 +254,7 @@ export async function writeLastUpdateMetadata(
   status: UpdateRunStatus = "complete",
   language?: string,
   gitHeadOverride?: string | null,
+  instructionBaseline?: RepositoryInstructionBaseline,
 ): Promise<void> {
   const metadataFile = getMetadataFilePath(cwd, outputMode);
   const gitHead =
@@ -221,6 +270,7 @@ export async function writeLastUpdateMetadata(
     model: modelId,
     status,
     ...(language ? { language } : {}),
+    ...(status === "complete" && instructionBaseline ? { instructionBaseline } : {}),
   };
 
   await writeTextAtomic(metadataFile, `${JSON.stringify(metadata, null, 2)}\n`);
@@ -242,6 +292,7 @@ export async function persistRunMetadataIfChanged(
   snapshotBefore: OpenWikiContentSnapshot | null,
   status: UpdateRunStatus = "complete",
   language?: string,
+  instructionBaseline?: RepositoryInstructionBaseline,
 ): Promise<boolean> {
   if (command === "chat" || snapshotBefore === null) {
     return false;
@@ -254,6 +305,8 @@ export async function persistRunMetadataIfChanged(
     outputMode,
     status,
     language,
+    undefined,
+    instructionBaseline,
   );
 
   return true;
@@ -731,6 +784,12 @@ async function readLastUpdate(
       typeof parsedMetadata.command === "string" &&
       typeof parsedMetadata.model === "string"
     ) {
+      const baseline = parsedMetadata.instructionBaseline;
+      const validBaseline =
+        baseline &&
+        /^[a-f0-9]{64}$/u.test(baseline.agents) &&
+        /^[a-f0-9]{64}$/u.test(baseline.wiki) &&
+        /^sha256:[a-f0-9]{64}$/u.test(baseline.sourceFingerprint);
       return {
         updatedAt: parsedMetadata.updatedAt,
         command: parsedMetadata.command === "init" ? "init" : "update",
@@ -747,6 +806,7 @@ async function readLastUpdate(
           typeof parsedMetadata.language === "string"
             ? parsedMetadata.language
             : undefined,
+        ...(validBaseline ? { instructionBaseline: baseline } : {}),
       };
     }
 

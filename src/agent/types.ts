@@ -118,6 +118,15 @@ export type OpenWikiRunOptions = {
 
 export type UpdateRunStatus = "complete" | "interrupted";
 
+export type RepositoryInstructionHashes = {
+  agents: string;
+  wiki: string;
+};
+
+export type RepositoryInstructionBaseline = RepositoryInstructionHashes & {
+  sourceFingerprint: string;
+};
+
 export type UpdateMetadata = {
   updatedAt: string;
   command: OpenWikiCommand;
@@ -125,6 +134,7 @@ export type UpdateMetadata = {
   model: string;
   status?: UpdateRunStatus;
   language?: string;
+  instructionBaseline?: RepositoryInstructionBaseline;
 };
 
 export type RunContext = {

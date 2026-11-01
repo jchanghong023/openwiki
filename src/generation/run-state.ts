@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { PersistedPreparedWikiState } from "../agent/wiki-finalizer.js";
-import type { UpdateMetadata } from "../agent/types.js";
+import type { RepositoryInstructionHashes, UpdateMetadata } from "../agent/types.js";
 import { OPEN_WIKI_DIR } from "../config/constants.js";
 import { isFileNotFoundError } from "../platform/fs-errors.js";
 import { RepositoryRunError } from "./errors.js";
@@ -169,6 +169,9 @@ export interface RepositoryRunState {
    */
   sourceFingerprint: string;
 
+  /** Instruction contents used by this run, absent in older checkpoints. */
+  instructionHashes?: RepositoryInstructionHashes;
+
   /**
    * Git HEAD paired with `sourceFingerprint` for the active semantic plan.
    *
@@ -217,6 +220,11 @@ export interface RepositoryRunState {
   plan?: RepositoryRunPlan;
 }
 
+const InstructionHashesSchema = z.object({
+  agents: z.string().regex(/^[a-f0-9]{64}$/u),
+  wiki: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
+
 const UpdateMetadataSchema = z
   .object({
     updatedAt: z.string(),
@@ -225,6 +233,9 @@ const UpdateMetadataSchema = z
     model: z.string(),
     status: z.enum(["complete", "interrupted"]),
     language: z.string().optional(),
+    instructionBaseline: InstructionHashesSchema.extend({
+      sourceFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    }).optional(),
   })
   .strict();
 
@@ -274,6 +285,7 @@ const RepositoryRunStateSchema = z
     requiredRewritePages: z.array(z.string().min(1)),
     initialPages: z.array(z.string().min(1)),
     sourceFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    instructionHashes: InstructionHashesSchema.optional(),
     targetGitHead: z.string().min(1).optional(),
     planningContext: z.string().min(1).optional(),
     actor: z

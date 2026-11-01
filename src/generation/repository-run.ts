@@ -9,6 +9,7 @@ import {
   createRunContext,
   getRepositoryChangedPaths,
   getUpdateNoopStatus,
+  readRepositoryInstructionHashes,
   persistRunMetadataIfChanged,
   writeLastUpdateMetadata,
 } from "../agent/utils.js";
@@ -47,6 +48,7 @@ import {
   resolveLanguage,
 } from "../platform/language.js";
 import { isFileNotFoundError } from "../platform/fs-errors.js";
+import { readRepositoryWikiInstructions } from "../setup/onboarding.js";
 import { RepositoryRunError } from "./errors.js";
 import {
   getCurrentRepositoryPageCompletion,
@@ -451,6 +453,7 @@ export async function beginRepositoryRun(
 
     const claimsStore = new ClaimsStore(input.root);
     const initialPages = await claimsStore.discoverPages();
+    const instructionHashes = await readRepositoryInstructionHashes(input.root, context.wikiGoal);
     const source = await createRepositorySourceSnapshot(input.root, ignore);
     if (
       input.mode === "update" &&
@@ -493,6 +496,10 @@ export async function beginRepositoryRun(
       if (
         preflight.shouldSkip &&
         claimsRuntime.issueCount === 0 &&
+        (!preflight.coveredSourceFingerprint ||
+          initialPages.every((page) =>
+            seededManifest?.pages[page]?.sourceFingerprint === preflight.coveredSourceFingerprint,
+          )) &&
         hasCompleteBaselineCoverage
       ) {
         const source = await createRepositorySourceSnapshot(input.root, ignore);
@@ -501,7 +508,12 @@ export async function beginRepositoryRun(
           input.root,
           ignore,
         );
-        if (stableSource.fingerprint === source.fingerprint) {
+        const stableInstructions = await readRepositoryInstructionHashes(
+          input.root, await readRepositoryWikiInstructions(input.root),
+        );
+        if (stableSource.fingerprint === source.fingerprint &&
+            stableInstructions.agents === instructionHashes.agents &&
+            stableInstructions.wiki === instructionHashes.wiki) {
           await replaceRepositoryPageManifest(input.root, initialPages, {
             sourceFingerprint: source.fingerprint,
             ...(source.gitHead ? { gitHead: source.gitHead } : {}),
@@ -510,7 +522,12 @@ export async function beginRepositoryRun(
             input.root,
             ignore,
           );
-          if (publishedSource.fingerprint === source.fingerprint) {
+          const publishedInstructions = await readRepositoryInstructionHashes(
+            input.root, await readRepositoryWikiInstructions(input.root),
+          );
+          if (publishedSource.fingerprint === source.fingerprint &&
+              publishedInstructions.agents === instructionHashes.agents &&
+              publishedInstructions.wiki === instructionHashes.wiki) {
             await writeLastUpdateMetadata(
               "update",
               input.root,
@@ -518,6 +535,8 @@ export async function beginRepositoryRun(
               "repository",
               "complete",
               preflight.language,
+              undefined,
+              { ...publishedInstructions, sourceFingerprint: publishedSource.fingerprint },
             );
             return {
               view: {
@@ -556,6 +575,7 @@ export async function beginRepositoryRun(
       requiredRewritePages,
       initialPages,
       sourceFingerprint: source.fingerprint,
+      instructionHashes,
       ...(source.gitHead ? { targetGitHead: source.gitHead } : {}),
       ...(input.planningContext
         ? { planningContext: input.planningContext }
@@ -662,7 +682,13 @@ async function resumeRepositoryRun(
     input.root,
     ignore,
   );
-  const sourceChanged = currentSource.fingerprint !== state.sourceFingerprint;
+  const wikiGoal = await readRepositoryWikiInstructions(input.root);
+  const instructionHashes = await readRepositoryInstructionHashes(input.root, wikiGoal);
+  const sourceChanged = currentSource.fingerprint !== state.sourceFingerprint ||
+    (wikiGoal ?? "") !== (state.wikiGoal ?? "") ||
+    (state.instructionHashes !== undefined &&
+      (state.instructionHashes.agents !== instructionHashes.agents ||
+       state.instructionHashes.wiki !== instructionHashes.wiki));
   const resetSkippedPages =
     state.plan?.pages.some(({ status }) => status === "skipped") ?? false;
   let nextState: RepositoryRunState = {
@@ -684,6 +710,9 @@ async function resumeRepositoryRun(
   if (sourceChanged) {
     nextState.phase = "planning";
     nextState.sourceFingerprint = currentSource.fingerprint;
+    nextState.instructionHashes = instructionHashes;
+    if (wikiGoal) nextState.wikiGoal = wikiGoal;
+    else delete nextState.wikiGoal;
     if (currentSource.gitHead) {
       nextState.targetGitHead = currentSource.gitHead;
     } else {
@@ -1727,8 +1756,14 @@ export async function finishRepositoryRun(
     skippedPages,
     preserveSourcePages,
   );
+  const wikiGoal = await readRepositoryWikiInstructions(run.root);
+  const instructionHashes = await readRepositoryInstructionHashes(run.root, wikiGoal);
   const sourceChanged =
-    sourceChangedBeforeFinish || (await hasRepositorySourceChanged(run));
+    sourceChangedBeforeFinish || (await hasRepositorySourceChanged(run)) ||
+    (wikiGoal ?? "") !== (run.state.wikiGoal ?? "") ||
+    (run.state.instructionHashes !== undefined &&
+      (run.state.instructionHashes.agents !== instructionHashes.agents ||
+       run.state.instructionHashes.wiki !== instructionHashes.wiki));
   if (skippedPages.size > 0 || sourceChanged) {
     await writeLastUpdateMetadata(
       run.state.mode,
@@ -1748,6 +1783,9 @@ export async function finishRepositoryRun(
       run.state.beforeContentSnapshot,
       "complete",
       run.state.language,
+      run.state.instructionHashes
+        ? { ...instructionHashes, sourceFingerprint: run.state.sourceFingerprint }
+        : undefined,
     );
   }
 
