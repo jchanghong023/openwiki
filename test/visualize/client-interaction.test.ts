@@ -219,7 +219,7 @@ async function importClient(): Promise<void> {
   await import("../../src/visualize/client.ts");
   // Wait for the bootstrap load(true) promise to populate the sidebar.
   await vi.waitFor(() => {
-    expect(document.querySelectorAll(".nav-item").length).toBe(2);
+    expect(document.querySelectorAll(".nav-item").length).toBe(graphPayload.nodes.length);
   });
 }
 
@@ -262,6 +262,35 @@ describe("visualizer client graph interaction", () => {
     // The only former path to the empty state was the background click; with
     // it gone the reader content must remain untouched.
     expect(document.querySelector("#detail .empty")).toBeNull();
+  });
+
+  test("opens directory links in the reader instead of navigating to a server 404", async () => {
+    const quickstart = graphPayload.nodes[0]!;
+    const originalBody = quickstart.body;
+    quickstart.body = '<a href="concepts/">Concepts</a>';
+    graphPayload.nodes.push({
+      id: "concepts/index",
+      title: "Concepts",
+      type: "Guide",
+      description: "",
+      tags: [],
+      body: "# Concepts",
+      size: 10,
+      links: [],
+      backlinks: [],
+    });
+    try {
+      await importClient();
+      handlers.onNodeClick!({ id: "quickstart" });
+      const link = document.querySelector<HTMLAnchorElement>("#detail .md a")!;
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      link.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      expect(document.querySelector("#detail .doc-title")?.textContent).toBe("Concepts");
+    } finally {
+      quickstart.body = originalBody;
+      graphPayload.nodes.pop();
+    }
   });
 
   test("selecting a node highlights the sidebar entry", async () => {
