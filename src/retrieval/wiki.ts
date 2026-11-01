@@ -91,7 +91,7 @@ const STOP_WORDS = new Set(
  * Stable correction guidance for pages outside the public retrieval surface.
  */
 const INVALID_WIKI_PAGE_MESSAGE =
-  "Page must be a non-structural Markdown path below openwiki/.";
+  "page must be a Markdown page from openwiki_search, e.g. openwiki/architecture/jobs.md; use only the part before '#', and put its anchor in sections. Structural/index and hidden pages are not readable.";
 
 /**
  * Readable anchor for the heading whose GitHub slug is empty, such as `## 🚀`.
@@ -694,8 +694,13 @@ export async function readWikiSections(
   );
   const missing = requested.filter((section) => !available.has(section));
   if (missing.length) {
+    const anchors = [...available.keys()].slice(
+      0,
+      WIKI_RETRIEVAL_LIMITS.sectionAnchors,
+    );
+    const subset = available.size > anchors.length ? ` (first ${anchors.length})` : "";
     throw new WikiRetrievalError(
-      `Unknown section${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}`,
+      `Unknown section${missing.length === 1 ? "" : "s"}: ${missing.join(", ")} in ${JSON.stringify(normalizedPage.slice(1))}. Available anchors${subset}: ${JSON.stringify(anchors)}. Use exact anchors from this page in sections, or search again with openwiki_search for fresh refs.`,
     );
   }
 
@@ -1117,7 +1122,7 @@ function normalizeSectionAnchor(value: string): string {
     [...normalized].some((character) => character < " ")
   ) {
     throw new WikiRetrievalError(
-      "Sections must be heading anchors without a page path.",
+      'sections must contain only heading anchors after "#" in search refs, e.g. ["retry-control"]; put the page before "#" in page, not in sections.',
     );
   }
   return normalized;
