@@ -407,22 +407,25 @@ export async function beginRepositoryRun(
   const requestedLanguage =
     resolvedRequest.kind === "resolved" ? resolvedRequest.language : undefined;
 
+  // Validate every existing checkpoint before setup, replacement, or resume can
+  // write anything. A damaged metadata file is not an absent prior run.
+  const persisted = await readRepositoryRunState(input.root);
+  const context = await createRunContext(
+    input.root,
+    "repository",
+    input.language,
+  );
+  await readRepositoryPageManifest(input.root);
+
   if (!input.embedded) {
     await ensureCodeModeRepoSetup(input.root, {
       createWorkflow: input.mode === "init",
     });
   }
 
-  const persisted = await readRepositoryRunState(input.root);
   if (persisted) {
     return resumeRepositoryRun(input, persisted);
   }
-
-  const context = await createRunContext(
-    input.root,
-    "repository",
-    input.language,
-  );
   const language = context.language ?? "en";
   const languageChanged =
     requestedLanguage !== undefined &&

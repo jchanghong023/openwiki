@@ -66,9 +66,15 @@ describe("host integration CLI dogfood", () => {
 
     expect(stdout.join("")).toContain("install Codex\n");
     expect(stderr.join("")).toBe("");
-    await expect(
-      stat(path.join(projectRoot, ".agents/skills/openwiki/SKILL.md")),
-    ).resolves.toMatchObject({});
+    const installedSkill = await readFile(
+      path.join(projectRoot, ".agents/skills/openwiki/SKILL.md"),
+      "utf8",
+    );
+    expect(installedSkill).toContain("name: openwiki");
+    expect(installedSkill).toContain("openwiki_search");
+    expect(installedSkill).toContain("openwiki_read");
+    expect(installedSkill).toContain("openwiki_begin");
+    expect(installedSkill).toContain("openwiki_finish");
     expect(
       await readFile(path.join(projectRoot, ".codex/config.toml"), "utf8"),
     ).toContain('args = ["mcp", "--host", "codex"]');

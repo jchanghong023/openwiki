@@ -13,6 +13,7 @@ import {
   PAGE_MANIFEST_PATH,
   UPDATE_METADATA_PATH,
 } from "../config/constants.js";
+import { RepositoryRunError } from "../generation/errors.js";
 import { writeTextAtomic } from "../integrations/install/atomic-file.js";
 import {
   isExpectedSnapshotRaceError,
@@ -767,7 +768,7 @@ function compareFingerprintStrings(left: string, right: string): number {
 }
 
 /**
- * Reads prior run metadata if it exists and is structurally valid.
+ * Reads prior run metadata, rejecting unreadable existing state.
  */
 async function readLastUpdate(
   cwd: string,
@@ -777,9 +778,12 @@ async function readLastUpdate(
 
   try {
     const rawMetadata = await readFile(metadataFile, "utf8");
-    const parsedMetadata = JSON.parse(rawMetadata) as Partial<UpdateMetadata>;
+    const parsedMetadata = JSON.parse(rawMetadata) as Partial<UpdateMetadata> | null;
 
     if (
+      parsedMetadata !== null &&
+      typeof parsedMetadata === "object" &&
+      !Array.isArray(parsedMetadata) &&
       typeof parsedMetadata.updatedAt === "string" &&
       typeof parsedMetadata.command === "string" &&
       typeof parsedMetadata.model === "string"
@@ -810,10 +814,19 @@ async function readLastUpdate(
       };
     }
 
-    return null;
+    throw new RepositoryRunError(
+      "invalid_state",
+      `OpenWiki update metadata is malformed at ${metadataFile}; refusing to discard previous run metadata.`,
+    );
   } catch (error) {
-    if (isFileNotFoundError(error) || error instanceof SyntaxError) {
+    if (isFileNotFoundError(error)) {
       return null;
+    }
+    if (error instanceof SyntaxError) {
+      throw new RepositoryRunError(
+        "invalid_state",
+        `OpenWiki update metadata is malformed at ${metadataFile}; refusing to discard previous run metadata.`,
+      );
     }
 
     throw error;

@@ -21,7 +21,7 @@ function runCommand(
     dryRun: false,
     exitCode: 0,
     language: null,
-    mode: "local-wiki",
+    mode: "personal",
     modeSource: "default",
     modelId: null,
     print: false,
@@ -113,7 +113,7 @@ describe("getRunModeCwd", () => {
   });
 
   test("uses the local wiki dir for non-code modes", () => {
-    expect(getRunModeCwd("local-wiki", "/work/repo")).toBe(
+    expect(getRunModeCwd("personal", "/work/repo")).toBe(
       openWikiLocalWikiDir,
     );
   });
@@ -122,7 +122,7 @@ describe("getRunModeCwd", () => {
 describe("getRunModeOutputMode", () => {
   test("maps code to repository and everything else to local-wiki", () => {
     expect(getRunModeOutputMode("code")).toBe("repository");
-    expect(getRunModeOutputMode("local-wiki")).toBe("local-wiki");
+    expect(getRunModeOutputMode("personal")).toBe("local-wiki");
   });
 });
 
