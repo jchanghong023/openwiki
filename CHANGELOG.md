@@ -1,5 +1,11 @@
 # openwiki
 
+## Unreleased
+
+### Fixed
+
+- Reuse one Git changed-path query per page-baseline cohort when fast-forwarding repository coverage across generated-wiki-only commits, avoiding repeated subprocess work while retaining each page's durable completion checks.
+
 ## 0.7.2
 
 ### Patch Changes

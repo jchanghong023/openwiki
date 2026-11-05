@@ -960,24 +960,31 @@ async function fastForwardUnchangedRepositoryPageCoverage(
   if (!source.gitHead) return;
 
   const manifest = await readRepositoryPageManifest(root);
+  const pagesByBaseline = new Map<string, string[]>();
   for (const page of [...pages].sort(compareCodeUnits)) {
     const entry = manifest.pages[page];
     if (!entry?.gitHead || entry.gitHead === source.gitHead) continue;
+    const group = pagesByBaseline.get(entry.gitHead) ?? [];
+    group.push(page);
+    pagesByBaseline.set(entry.gitHead, group);
+  }
 
-    const changedPaths = await getRepositoryChangedPaths(
-      root,
-      ignore,
-      entry.gitHead,
-    );
+  for (const [baseline, baselinePages] of pagesByBaseline) {
+    // Pages in one baseline cohort share the same source diff. Manifest writes
+    // below touch only generated wiki state, so query Git once for the cohort.
+    const changedPaths = await getRepositoryChangedPaths(root, ignore, baseline);
     if (changedPaths.length > 0) continue;
 
-    await recordRepositoryPageCompletion(
-      root,
-      page,
-      source,
-      entry.completedBy,
-      entry.completedRunId,
-    );
+    for (const page of baselinePages) {
+      const entry = manifest.pages[page];
+      await recordRepositoryPageCompletion(
+        root,
+        page,
+        source,
+        entry?.completedBy,
+        entry?.completedRunId,
+      );
+    }
   }
 }
 
