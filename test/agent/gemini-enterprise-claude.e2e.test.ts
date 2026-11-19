@@ -1,20 +1,13 @@
+// @vitest-environment jsdom
+
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { ensureDomGlobals } from "../../src/mermaid/dom-shim.ts";
 import { createModel } from "../../src/agent/index.ts";
 
-// End-to-end regression for issue #3, using the REAL Anthropic Vertex SDK (no
-// mock) and the REAL Mermaid DOM shim. The optional Mermaid validation path
-// installs jsdom's window/document globals process-wide; the Anthropic SDK's
-// browser guard (window && window.document && navigator all defined) then throws
-// "browser-like environment" at client construction, aborting the whole run.
-//
-// This test would FAIL (throw that error) if dangerouslyAllowBrowser were
-// removed from the AnthropicVertex construction. Unlike the mocked unit test it
-// exercises the actual SDK guard, so it guards against a base-SDK option rename
-// or a regression in the fix.
+// Regression for issue #3: exercise the real Anthropic Vertex SDK's browser
+// guard in a browser-like host instead of assuming the option is honored.
 //
 // Suppressing the ADC unhandled rejection: AnthropicVertex's constructor eagerly
 // runs `new GoogleAuth().getClient()` and does not await the promise (it is only
@@ -41,7 +34,7 @@ const FAKE_AUTHORIZED_USER_ADC = JSON.stringify({
   refresh_token: "test-refresh-token",
 });
 
-describe("gemini-enterprise Claude surface (real SDK + jsdom shim, issue #3)", () => {
+describe("gemini-enterprise Claude surface (real SDK, issue #3)", () => {
   let saved: Record<string, string | undefined> = {};
   let credsDir: string | undefined;
 
@@ -78,12 +71,7 @@ describe("gemini-enterprise Claude surface (real SDK + jsdom shim, issue #3)", (
     }
   });
 
-  test("constructs the Vertex Claude client with jsdom DOM globals present", async () => {
-    // Install the real DOM globals exactly as the Mermaid validation path does.
-    await ensureDomGlobals();
-    expect(typeof globalThis.window).toBe("object");
-    expect(typeof globalThis.document).toBe("object");
-
+  test("constructs the Vertex Claude client with DOM globals present", () => {
     const model = createModel(
       "gemini-enterprise",
       "publishers/anthropic/models/claude-opus-4-8",

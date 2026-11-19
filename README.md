@@ -392,14 +392,7 @@ OpenWiki embeds **Mermaid** diagrams wherever they make a concept clearer than p
 <details>
 <summary><b>Diagram validation and repair</b></summary>
 
-After each run, OpenWiki validates every `mermaid` fence. A diagram that fails validation is converted in place to a plain `text` fence with a short comment explaining why, so it degrades to readable text instead of a broken block. The next `--update` finds that comment and repairs the diagram, so quality recovers over successive runs.
-
-> [!TIP]
-> By default OpenWiki runs a lightweight, zero-dependency check that catches common breakages. For authoritative validation that matches exactly what GitHub renders, install the Mermaid parser wherever you run OpenWiki (for example in your scheduled workflow), and no broken diagram will ship:
->
-> ```sh
-> npm install mermaid jsdom
-> ```
+After generation and updates, OpenWiki checks basic flowchart, sequence diagram, and state diagram structure without loading Mermaid or a DOM. It converts fences with definite structural errors to plain `text` fences and leaves a repair comment. Other diagram types and syntax outside those checks are left untouched; a check passing does not guarantee the diagram renders. The browser visualizer still uses Mermaid to render diagrams.
 
 </details>
 

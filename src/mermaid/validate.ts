@@ -1,18 +1,16 @@
-import { sanitizeDiagnosticText } from "../platform/diagnostics.js";
-import { ensureDomGlobals } from "./dom-shim.js";
 import { extractMermaidFences, type MermaidFence } from "./fences.js";
 
 /**
- * A mermaid fence that failed to parse, paired with its sanitized error.
+ * A detected structural error in a Mermaid fence.
  */
 export interface MermaidFenceError {
   /**
-   * The fence whose body Mermaid rejected.
+   * The fence containing the error.
    */
   fence: MermaidFence;
 
   /**
-   * The parser error, secret-redacted and made HTML-comment-safe.
+   * A fixed diagnostic safe to write in an HTML comment.
    */
   error: string;
 }
@@ -32,143 +30,116 @@ export interface MermaidDegradeResult {
   degraded: number;
 }
 
-/**
- * The subset of the Mermaid API this module depends on.
- */
-interface MermaidApi {
-  /**
-   * Parses diagram text and rejects when it is not renderable.
-   */
-  parse: (text: string) => Promise<unknown>;
+// Skip optional metadata before recognizing the diagram type.
+function diagramBody(text: string): string {
+  return text
+    .trimStart()
+    .replace(/^---[ \t]*\r?\n(?:[\s\S]*?\n)?---[ \t]*(?:\r?\n|$)/u, "")
+    .replace(/^(?:\s*%%(?:\{[\s\S]*?\}%%|[^\n]*))*/u, "")
+    .trimStart();
 }
 
-let mermaidPromise: Promise<MermaidApi | undefined> | undefined;
+const FLOW_TOKEN =
+  /^[ \t]*%%[^\n]*|"[^"]*(?:"|$)|\|[^|\n]*\||@\{|\[(?:\[|\(|[/\\])|^[ \t]*end(?=[ \t]*(?:\[|-->))|-->[ \t]*(?:\|[^|\n]*\|[ \t]*)?end(?=[ \t]*(?:\[|-->|;|$))|[\[\](){}]/gmu;
 
-/**
- * Loads the Mermaid parser after installing DOM globals, or resolves to
- * `undefined` when mermaid/jsdom are not installed.
- *
- * `mermaid` and `jsdom` are optional peer dependencies. When present, callers
- * get the authoritative parser; when absent, they get `undefined` and fall back
- * to `heuristicError`. The import is lazy and memoized so a wiki with no
- * diagrams never pulls them in, and mermaid must not be imported anywhere else,
- * or it may evaluate before the DOM shim runs.
- */
-export function loadMermaid(): Promise<MermaidApi | undefined> {
-  if (!mermaidPromise) {
-    mermaidPromise = (async () => {
-      try {
-        await ensureDomGlobals();
-        const module: { default: MermaidApi } = await import("mermaid");
-        return module.default;
-      } catch (error) {
-        // Expected path: the optional peer deps are simply not installed, so we
-        // fall back to heuristic validation. An unexpected load failure (an
-        // installed mermaid that throws) is kept distinct here per review, but
-        // still falls back rather than crashing the wiki run.
-        void isModuleNotFound(error);
-        return undefined;
+function checkFlowchart(body: string): string | undefined {
+  let close: string | undefined;
+  let squareNode = false;
+  for (const match of body.matchAll(FLOW_TOKEN)) {
+    const token = match[0];
+    if (close !== undefined) {
+      if (token === close) {
+        close = undefined;
+        squareNode = false;
+      } else if (squareNode && token === "[") {
+        return "A square-bracket node label is missing its closing `]` before another `[`.";
       }
-    })();
+      continue;
+    }
+    // Alternative shapes have their own delimiters; don't guess.
+    if (token === "@{" || (token.startsWith("[") && token.length > 1)) return;
+    if (token === "[") {
+      close = "]";
+      squareNode = /[\p{L}\p{N}_-]/u.test(body[match.index - 1] ?? "");
+    } else if (token === "(" || token === "{") {
+      close = token === "(" ? ")" : "}";
+    } else if (token.trimStart().startsWith("end") || token.startsWith("-->")) {
+      return "`end` is a reserved word and cannot be used as a flowchart node ID.";
+    }
   }
-  return mermaidPromise;
+  if (squareNode) return "A square-bracket node label is missing its closing `]`.";
 }
 
-/**
- * True when a dynamic import failed because the module is not installed.
- */
-function isModuleNotFound(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")
-  );
+function checkBlocks(body: string, stateDiagram: boolean): string | undefined {
+  const blocks: Array<{ name: string; line: number }> = [];
+  let inNote = false;
+  for (const [i, raw] of body.split("\n").entries()) {
+    if (i === 0) continue;
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith("%%")) {
+      if (line.startsWith("%%{") && !line.endsWith("}%%")) return;
+      continue;
+    }
+    if (inNote) {
+      if (/^end[ \t]+note[ \t]*(?:%%.*)?$/u.test(line)) inNote = false;
+      continue;
+    }
+    if (stateDiagram && /^note\b/u.test(line)) {
+      if (/^note[ \t]+(?:left|right)[ \t]+of[ \t]+[\w.-]+[ \t]*(?:%%.*)?$/u.test(line)) {
+        inNote = true;
+      } else if (!line.includes(":")) {
+        return;
+      }
+      continue;
+    }
+    // Compound statements can hide a block opener or closer on the same line.
+    if (line.includes(";")) return;
+    const opener = stateDiagram
+      ? /^state[ \t]+(?:[\w.-]+|"[^"]+"[ \t]+as[ \t]+[\w.-]+)[ \t]*\{[ \t]*(?:%%.*)?$/u.exec(line)
+      : /^(loop|alt|opt|par|par_over|critical|break|rect|box)(?:[ \t]+|$)/u.exec(line);
+    if (opener) {
+      blocks.push({ name: stateDiagram ? "composite state" : opener[1], line: i + 1 });
+    } else if ((stateDiagram ? /^\}[ \t]*(?:%%.*)?$/u : /^end[ \t]*(?:%%.*)?$/u).test(line)) {
+      if (!blocks.pop()) {
+        return `Unexpected ${stateDiagram ? "`}`" : "`end`"} at diagram line ${i + 1}.`;
+      }
+    } else if (stateDiagram && /[{}]/u.test(line)) {
+      // Inline composite states and other forms outside the checked subset.
+      return;
+    }
+  }
+  const block = blocks.at(-1);
+  if (block && !inNote) {
+    return `Unclosed ${block.name} block at diagram line ${block.line}; missing ${stateDiagram ? "`}`" : "`end`"}.`;
+  }
 }
 
-/**
- * Parses every mermaid fence in a document and returns the failures.
- *
- * Uses the authoritative mermaid parser when it is installed, otherwise a
- * conservative heuristic that only flags near-certain breakages.
- */
+function structuralError(text: string): string | undefined {
+  const body = diagramBody(text);
+  const newline = body.indexOf("\n");
+  const heading = (newline === -1 ? body : body.slice(0, newline)).trimEnd();
+  if (/^(?:flowchart|graph)(?:[ \t]+(?:TB|TD|BT|RL|LR))?[ \t]*(?:%%.*)?$/u.test(heading)) {
+    return newline === -1 ? undefined : checkFlowchart(body.slice(newline + 1));
+  }
+  if (/^sequenceDiagram[ \t]*(?:%%.*)?$/u.test(heading)) return checkBlocks(body, false);
+  if (/^stateDiagram(?:-v2)?[ \t]*(?:%%.*)?$/u.test(heading)) return checkBlocks(body, true);
+}
+
+/** Reports definite structural errors in the checked subset, not full syntax validity. */
 export async function findInvalidMermaidFences(
   markdown: string,
 ): Promise<MermaidFenceError[]> {
-  const fences = extractMermaidFences(markdown);
-  if (fences.length === 0) {
-    return [];
-  }
-
-  const mermaid = await loadMermaid();
-  const errors: MermaidFenceError[] = [];
-
-  for (const fence of fences) {
-    let reason: string | undefined;
-    if (mermaid) {
-      try {
-        await mermaid.parse(fence.body);
-      } catch (err) {
-        reason = sanitizeMermaidError(err);
-      }
-    } else {
-      const heuristic = heuristicError(fence.body);
-      if (heuristic !== undefined) {
-        reason = sanitizeMermaidError(heuristic);
-      }
-    }
-    if (reason !== undefined) {
-      errors.push({ fence, error: reason });
-    }
-  }
-
-  return errors;
+  return extractMermaidFences(markdown).flatMap((fence) => {
+    const reason = structuralError(fence.body);
+    return reason === undefined ? [] : [{ fence, error: reason }];
+  });
 }
 
 /**
- * Best-effort syntax check used when the mermaid parser is not installed.
- *
- * Deliberately conservative: it only flags breakages that are near-certain, so
- * a valid diagram is never degraded. It therefore misses errors the real parser
- * would catch; install `mermaid` (for example in CI) for authoritative
- * validation. Returns a short reason when the diagram is very likely broken.
- *
- * Exported for unit testing; production callers reach it via
- * `findInvalidMermaidFences`.
- */
-export function heuristicError(body: string): string | undefined {
-  const firstWord = body.trim().split(/\s+/u)[0]?.toLowerCase() ?? "";
-  const isFlowchart = firstWord === "flowchart" || firstWord === "graph";
-
-  // Reserved `end` used as a flowchart node id. Restricted to flowcharts because
-  // `end` legitimately closes loop/alt/opt blocks in sequence and state diagrams.
-  if (
-    isFlowchart &&
-    (/(?:^|\n|\s)end\s*[[({]/u.test(body) ||
-      /-->\s*end\s*(?:$|\n|;)/mu.test(body))
-  ) {
-    return "Heuristic: `end` is a reserved word and cannot be a flowchart node id; rename the node.";
-  }
-
-  // A semicolon inside a label: mermaid treats it as a statement separator.
-  if (/[[({][^)\]}]*;[^)\]}]*[)\]}]/u.test(body)) {
-    return "Heuristic: a semicolon inside a label breaks rendering; rephrase the label.";
-  }
-
-  // An unescaped angle bracket inside a label.
-  if (/[[({][^)\]}]*[<>][^)\]}]*[)\]}]/u.test(body)) {
-    return "Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label.";
-  }
-
-  return undefined;
-}
-
-/**
- * Degrades invalid mermaid fences to plain ```text fences so content survives
- * and no broken diagram block reaches a renderer.
- *
- * Each degraded fence is preceded by an HTML comment carrying the parser error,
- * so a later update run can find it inline and repair the diagram. Returns the
- * input unchanged when every fence parses.
+ * Degrades fences with detected structural errors to plain ```text fences.
+ * The diagnostic comment lets a later update find and repair the diagram.
+ * Unrecognized syntax and diagram types are left unchanged.
  */
 export async function degradeInvalidMermaidFences(
   markdown: string,
@@ -185,7 +156,7 @@ export async function degradeInvalidMermaidFences(
     const comment =
       `${fence.indent}<!-- openwiki: mermaid parse failed and this diagram ` +
       `was converted to a text fence so it does not break rendering. Fix the ` +
-      `diagram source and restore the mermaid fence. Parser error: ${error} -->`;
+      `diagram source and restore the mermaid fence. Reason: ${error} -->`;
     lines.splice(
       fence.openLine,
       fence.closeLine - fence.openLine + 1,
@@ -197,41 +168,4 @@ export async function degradeInvalidMermaidFences(
   }
 
   return { content: lines.join("\n"), degraded: errors.length };
-}
-
-/**
- * Makes a thrown Mermaid parser error safe to embed in a wiki HTML comment.
- *
- * The error first passes through `sanitizeDiagnosticText`, the codebase's
- * secret-redaction boundary. It is then flattened to one line, keeping the
- * meaningful lines (the location and the `Expecting ... got ...` diagnosis) and
- * dropping only the caret-underline noise, since that diagnosis is what lets a
- * later run actually repair the diagram. Finally `--` (which would terminate an
- * HTML comment) is collapsed and the result is length-capped.
- *
- * Exported for unit testing; production callers reach it via
- * `findInvalidMermaidFences`.
- */
-export function sanitizeMermaidError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : stringifyUnknown(error);
-  const redacted = sanitizeDiagnosticText(raw);
-  const meaningful = redacted
-    .split("\n")
-    // Drop blank lines and caret-underline lines (only whitespace/`-`/`^`).
-    .filter((line) => line.trim() !== "" && !/^[\s^-]+$/u.test(line))
-    .join(" ")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return meaningful.replaceAll("--", "-").slice(0, 400) || "unknown error";
-}
-
-/**
- * Best-effort string form of a non-Error thrown value, never itself throwing.
- */
-function stringifyUnknown(value: unknown): string {
-  try {
-    return typeof value === "string" ? value : JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
 }

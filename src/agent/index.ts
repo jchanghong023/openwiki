@@ -1555,16 +1555,9 @@ function createGeminiEnterpriseModel(
       // constructor so a stray ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN cannot
       // clobber the Google OAuth token (see withAnthropicAuthEnvNeutralized).
       //
-      // dangerouslyAllowBrowser: the Anthropic SDK (base of AnthropicVertex)
-      // refuses to construct when it detects `window`/`document`/`navigator` —
-      // its browser-credential-exposure guard. OpenWiki is always a Node CLI/CI
-      // process, but the optional Mermaid validation path installs jsdom DOM
-      // globals process-wide (see src/mermaid/dom-shim.ts), which trips that
-      // guard and aborts the whole run before any docs are generated. ChatAnthropic
-      // passes `dangerouslyAllowBrowser: true` into `createClient`, but this hook
-      // ignores its argument, so the flag is set explicitly here. It is forwarded
-      // to AnthropicVertex only — never the ANTHROPIC_* auth options LangChain
-      // also passes, which would defeat withAnthropicAuthEnvNeutralized.
+      // A host can provide browser-like globals even when credentials come
+      // from Node ADC. Bypass the SDK's environment guard for Vertex only,
+      // without forwarding LangChain's ANTHROPIC_* auth options.
       return new ChatAnthropic(stripPublisherPath(modelId), {
         createClient: () =>
           withAnthropicAuthEnvNeutralized(

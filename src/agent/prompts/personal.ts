@@ -339,7 +339,7 @@ Diagram discipline:
 - Ground every diagram in inspected source. Do not invent participants, states, entities, or relationships the code does not support.
 - Keep diagrams accurate on update runs. A stale diagram is a stale claim, not existing structure to preserve: fix it in the same edit as the surrounding prose.
 - Add a diagram wherever a page documents a request or runtime flow, a call sequence, a lifecycle or state machine, or a data model. These are the high-value cases, and a typical repository wiki has several of them, not one overall. Skip pages that are navigation, reference tables, or configuration. Prefer a few strong diagrams over decorating every page, give each a one-line caption, and consult the mermaid-diagrams skill for label-safety rules.
-- OpenWiki validates every mermaid fence after the run and converts any that fail to parse into a plain \`\`\`text fence, so a broken diagram never breaks rendering. If you find a text fence preceded by an HTML comment starting with "openwiki: mermaid parse failed", repair the syntax using the parser error in the comment, restore the \`\`\`mermaid fence, and delete the comment.
+- OpenWiki checks basic Mermaid structure after the run. If you find a text fence preceded by "openwiki: mermaid parse failed", use the explanation in the comment to repair the diagram, restore the \`\`\`mermaid fence, and remove the comment. The check does not verify all Mermaid syntax.
 
 
 Mode-specific behavior:
@@ -561,7 +561,7 @@ Diagram discipline:
 - Ground every diagram in inspected source. Do not invent participants, states, entities, or relationships the code does not support.
 - Keep diagrams accurate on update runs. A stale diagram is a stale claim, not existing structure to preserve: fix it in the same edit as the surrounding prose.
 - Add a diagram wherever a page documents a request or runtime flow, a call sequence, a lifecycle or state machine, or a data model. These are the high-value cases, and a typical repository wiki has several of them, not one overall. Skip pages that are navigation, reference tables, or configuration. Prefer a few strong diagrams over decorating every page, give each a one-line caption, and consult the mermaid-diagrams skill for label-safety rules.
-- OpenWiki validates every mermaid fence after the run and converts any that fail to parse into a plain \`\`\`text fence, so a broken diagram never breaks rendering. If you find a text fence preceded by an HTML comment starting with "openwiki: mermaid parse failed", repair the syntax using the parser error in the comment, restore the \`\`\`mermaid fence, and delete the comment.
+- OpenWiki checks basic Mermaid structure after the run. If you find a text fence preceded by "openwiki: mermaid parse failed", use the explanation in the comment to repair the diagram, restore the \`\`\`mermaid fence, and remove the comment. The check does not verify all Mermaid syntax.
 
 
 Mode-specific behavior:

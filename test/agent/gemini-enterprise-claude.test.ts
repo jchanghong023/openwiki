@@ -86,13 +86,9 @@ describe("gemini-enterprise Claude surface (createClient)", () => {
   });
 
   test("forwards dangerouslyAllowBrowser to AnthropicVertex, and only that flag (not the ANTHROPIC_* auth options)", () => {
-    // The Anthropic SDK refuses to construct once the Mermaid jsdom shim installs
-    // window/document globals unless dangerouslyAllowBrowser is set (that guard's
-    // suppression is proven end-to-end against the real SDK in
-    // gemini-enterprise-claude.e2e.test.ts). Here, with the SDK mocked, assert
-    // only that the flag is forwarded and — critically — that the ANTHROPIC_*
-    // auth options LangChain also hands the hook are NOT forwarded, since that
-    // would send an Authorization header clobbering the Google OAuth token.
+    // The browser-like host case is covered against the real SDK in the E2E
+    // test. Here, make sure LangChain's ANTHROPIC_* auth options are not forwarded
+    // with the browser override, since they would clobber the Google OAuth token.
     const model = createModel(
       "gemini-enterprise",
       "publishers/anthropic/models/claude-sonnet-4-5@20250929",
